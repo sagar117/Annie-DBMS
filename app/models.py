@@ -37,6 +37,7 @@ class Call(Base):
     twilio_call_sid = Column(String, nullable=True)
     status = Column(String, default="queued")  # queued, in_progress, completed, failed
     start_time = Column(DateTime, nullable=True)
+    agent = Column(String, nullable=True)
     end_time = Column(DateTime, nullable=True)
     duration_seconds = Column(Integer, nullable=True)
     transcript = Column(Text, nullable=True)

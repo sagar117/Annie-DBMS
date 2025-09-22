@@ -1,0 +1,276 @@
+# app/api/calls.py
+from fastapi import APIRouter, Request, Response, HTTPException
+from fastapi.responses import JSONResponse
+from typing import Optional, Dict, Any
+from datetime import datetime
+import html
+import os
+import requests
+import json
+
+from app import db, models
+from app.services import openai_client
+
+router = APIRouter(prefix="/api/calls", tags=["calls"])
+
+
+@router.post("/outbound")
+def outbound_call(payload: Dict[str, Any]):
+    """
+    Create an outbound call record and (optionally) create the Twilio call.
+
+    Expected JSON payload:
+    {
+      "org_id": <int>,
+      "patient_id": <int or string>,
+      "to_number": "+91....",
+      "agent": "annie_RPM"   # optional
+    }
+
+    Returns: {"call_id": <int>, "status": "initiated"}
+    """
+    body = payload or {}
+    org_id = body.get("org_id")
+    patient_id = body.get("patient_id")
+    to_number = body.get("to_number")
+    agent = body.get("agent") or "annie_RPM"
+
+    if not (org_id and patient_id and to_number):
+        raise HTTPException(status_code=400, detail="org_id, patient_id and to_number are required")
+
+    session = db.SessionLocal()
+    try:
+        new_call = models.Call(
+            org_id=org_id,
+            patient_id=patient_id,
+            twilio_call_sid=None,
+            agent=agent,
+            status="initiated",
+            start_time=None,
+            end_time=None,
+            transcript=None,
+            summary=None,
+        )
+        session.add(new_call)
+        session.commit()
+        session.refresh(new_call)
+        call_id = new_call.id
+
+        # Try to create the Twilio call (best-effort). If env not configured, skip gracefully.
+        try:
+            TW_SID = os.getenv("TWILIO_ACCOUNT_SID")
+            TW_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+            TW_FROM = os.getenv("TWILIO_FROM_NUMBER")  # must be set to a verified Twilio number
+            # PUBLIC_HOST is optional; fallback to ngrok host used previously
+            HOST = os.getenv("PUBLIC_HOST") or os.getenv("NGROK_HOST") or "f14d07d855c2.ngrok-free.app"
+
+            if TW_SID and TW_TOKEN and TW_FROM:
+                twiml_url = f"https://{HOST}/api/calls/twiml/outbound/{call_id}?agent={html.escape(agent)}"
+                resp = requests.post(
+                    f"https://api.twilio.com/2010-04-01/Accounts/{TW_SID}/Calls.json",
+                    auth=(TW_SID, TW_TOKEN),
+                    data={"To": to_number, "From": TW_FROM, "Url": twiml_url, "Method": "GET"},
+                    timeout=15,
+                )
+                if resp.status_code in (200, 201):
+                    data = resp.json()
+                    tw_sid = data.get("sid")
+                    if tw_sid:
+                        # persist twilio_call_sid
+                        try:
+                            session2 = db.SessionLocal()
+                            try:
+                                call_row = session2.query(models.Call).filter(models.Call.id == call_id).first()
+                                if call_row:
+                                    call_row.twilio_call_sid = tw_sid
+                                    session2.add(call_row)
+                                    session2.commit()
+                            finally:
+                                session2.close()
+                        except Exception as e:
+                            print("[outbound_call] failed to save twilio_call_sid:", repr(e))
+                else:
+                    print(f"[outbound_call] Twilio create call failed: {resp.status_code} {resp.text}")
+            else:
+                print("[outbound_call] Twilio credentials / FROM number not set. Skipping Twilio call.")
+        except Exception as e:
+            # don't fail the API if Twilio call fails - we keep the DB row
+            print("[outbound_call] Twilio call error:", repr(e))
+
+        return {"call_id": call_id, "status": "initiated"}
+    finally:
+        session.close()
+
+
+@router.api_route("/twiml/outbound/{call_id}", methods=["GET", "POST"])
+async def twiml_outbound(call_id: int, request: Request, agent: Optional[str] = None):
+    """
+    TwiML returned to Twilio for outbound calls. Contains Connect->Stream with call_id and agent.
+    Twilio may fetch this via GET or POST.
+    """
+    # Prefer explicit query param or form field 'agent'
+    agent_name = None
+    try:
+        q_agent = request.query_params.get("agent")
+        if q_agent:
+            agent_name = q_agent
+        else:
+            if request.method == "POST":
+                form = await request.form()
+                agent_name = form.get("agent") or agent
+            else:
+                agent_name = agent
+    except Exception:
+        agent_name = agent
+
+    if not agent_name:
+        # fallback default
+        agent_name = "annie_RPM"
+
+    host = request.url.netloc
+    stream_url = f"wss://{host}/ws/call_id={call_id}?agent={html.escape(agent_name)}"
+    stream_url_escaped = html.escape(stream_url, quote=True)
+
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="{stream_url_escaped}"/>
+  </Connect>
+</Response>"""
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/{call_id}/complete")
+def complete_call(call_id: int):
+    """
+    Mark call completed, run OpenAI extraction to get readings & save them.
+    Idempotent: safe to call multiple times.
+    """
+    session = db.SessionLocal()
+    try:
+        call = session.query(models.Call).filter(models.Call.id == call_id).first()
+        if not call:
+            raise HTTPException(status_code=404, detail="Call not found")
+
+        if call.status == "completed":
+            return {"call_id": call.id, "status": "already_completed"}
+
+        # mark end
+        call.end_time = call.end_time or datetime.utcnow()
+        call.status = "completed"
+        if call.start_time and call.end_time:
+            call.duration_seconds = int((call.end_time - call.start_time).total_seconds())
+        session.add(call)
+        session.commit()
+
+        # run OpenAI extraction (best-effort)
+        transcript_text = (call.transcript or "") + "\n" + (call.summary or "")
+        try:
+            parsed = openai_client.extract_readings_from_transcript(transcript_text)
+        except Exception as e:
+            parsed = {}
+            print("[complete_call] openai extraction failed:", repr(e))
+
+        # If parsed contains a 'summary' field, save it
+        try:
+            if isinstance(parsed, dict) and parsed.get("summary"):
+                call.summary = (call.summary or "") + "\n[OA_SUMMARY] " + parsed["summary"][:3000]
+                session.add(call)
+                session.commit()
+        except Exception as e:
+            print("[complete_call] saving summary failed:", repr(e))
+
+        # Persist readings into models.Reading (support dict or list)
+        try:
+            readings = None
+            if isinstance(parsed, dict) and parsed.get("readings"):
+                readings = parsed["readings"]
+            elif isinstance(parsed, dict):
+                readings = parsed
+            elif isinstance(parsed, list):
+                readings = parsed
+
+            if readings:
+                import json as _json
+                if isinstance(readings, dict):
+                    for key, val in readings.items():
+                        if val is None:
+                            continue
+                        rd = models.Reading(
+                            patient_id=call.patient_id,
+                            call_id=call.id,
+                            reading_type=key,
+                            value=_json.dumps({"value": val}),
+                            units=None,
+                            raw_text=str(val),
+                            recorded_at=None,
+                        )
+                        session.add(rd)
+                elif isinstance(readings, list):
+                    for r in readings:
+                        rd = models.Reading(
+                            patient_id=call.patient_id,
+                            call_id=call.id,
+                            reading_type=r.get("type") or "unknown",
+                            value=_json.dumps(r),
+                            units=r.get("units"),
+                            raw_text=str(r),
+                            recorded_at=r.get("recorded_at"),
+                        )
+                        session.add(rd)
+                session.commit()
+        except Exception as e:
+            print("[complete_call] persisting readings failed:", repr(e))
+
+        return {"call_id": call.id, "status": "completed"}
+    finally:
+        session.close()
+
+
+@router.get("/{call_id}")
+def get_call(call_id: int):
+    session = db.SessionLocal()
+    try:
+        call = session.query(models.Call).filter(models.Call.id == call_id).first()
+        if not call:
+            raise HTTPException(status_code=404, detail="Call not found")
+        return {
+            "id": call.id,
+            "org_id": call.org_id,
+            "patient_id": call.patient_id,
+            "agent": call.agent,
+            "status": call.status,
+            "start_time": call.start_time.isoformat() if call.start_time else None,
+            "end_time": call.end_time.isoformat() if call.end_time else None,
+            "duration_seconds": call.duration_seconds,
+            "transcript": call.transcript,
+            "summary": call.summary,
+            "twilio_call_sid": call.twilio_call_sid,
+        }
+    finally:
+        session.close()
+
+
+@router.get("/{call_id}/readings")
+def get_call_readings(call_id: int):
+    """
+    Extract structured readings from the call's transcript using OpenAI.
+    Returns a JSON object with reading keys.
+    """
+    session = db.SessionLocal()
+    try:
+        call = session.query(models.Call).filter(models.Call.id == call_id).first()
+        if not call:
+            raise HTTPException(status_code=404, detail="Call not found")
+        if not (call.transcript or call.summary):
+            raise HTTPException(status_code=400, detail="No transcript available for this call")
+
+        try:
+            res = openai_client.extract_readings_from_transcript((call.transcript or "") + "\n" + (call.summary or ""))
+        except Exception as e:
+            print("[get_call_readings] openai failed:", repr(e))
+            return {"call_id": call.id, "patient_id": call.patient_id, "readings": {}}
+
+        return {"call_id": call.id, "patient_id": call.patient_id, "readings": res}
+    finally:
+        session.close()

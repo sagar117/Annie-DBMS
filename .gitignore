@@ -1,2 +1,4 @@
 venv
 .env
+annie.db
+annie.db.bak

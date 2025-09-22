@@ -1,18 +1,25 @@
 # app/main.py
 import logging
 import json
-import traceback
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+
+# Import routers if available in your project
+try:
+    from app.api import calls, patients, orgs  # noqa: F401
+except Exception:
+    calls = None
+    patients = None
+    orgs = None
 
 logger = logging.getLogger("annie.main")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Annie Backend")
 
-# CORS (adjust allowed_origins for production)
+# CORS (adjust origins as required)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,28 +28,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Include API routers (defensive import + logging) ---
-print("[main] starting router include check...")
-try:
-    from app.api import calls, patients, orgs  # type: ignore
-    print("[main] imported app.api modules OK")
-except Exception as e:
-    print("[main] failed importing app.api:", repr(e))
-    traceback.print_exc()
-    calls = patients = orgs = None  # type: ignore
+# include routers if they exist
+if calls is not None:
+    try:
+        app.include_router(calls.router)
+    except Exception:
+        pass
+if patients is not None:
+    try:
+        app.include_router(patients.router)
+    except Exception:
+        pass
+if orgs is not None:
+    try:
+        app.include_router(orgs.router)
+    except Exception:
+        pass
 
-for name, mod in (("calls", calls), ("patients", patients), ("orgs", orgs)):
-    if mod is None:
-        print(f"[main] router module {name} is None, skipping include")
-    else:
-        try:
-            app.include_router(mod.router)
-            print(f"[main] included router: /api/{name}")
-        except Exception as e:
-            print(f"[main] include_router failed for {name}: {repr(e)}")
-            traceback.print_exc()
-
-# Simple health-check
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -54,7 +56,7 @@ def health():
 @app.websocket("/ws/{tail:path}")
 async def websocket_endpoint(websocket: WebSocket, tail: str = ""):
     """
-    WebSocket endpoint that preserves the full raw ASGI path + querystring, then
+    WebSocket endpoint that preserves the full raw ASGI path and querystring, then
     delegates to bridge_ws(ws, path_arg).
     This ensures percent-encoded segments (like call_id%3D70) are preserved.
     """
@@ -81,16 +83,15 @@ async def websocket_endpoint(websocket: WebSocket, tail: str = ""):
 
     logger.info("WebSocket connected: path_arg=%s", path_arg)
 
-    # Lazy import of the bridge to avoid circular imports at module load time
+    # Import bridge lazily (so we don't create circular import problems)
     try:
         from app.services.deepgram_handler import bridge_ws  # type: ignore
     except Exception as e:
         logger.exception("bridge_ws import failed: %s", e)
-        bridge_ws = None  # type: ignore
+        bridge_ws = None
 
     if bridge_ws is None:
         try:
-            # send a small JSON error message to client before closing
             await websocket.send_text(json.dumps({"error": "bridge_ws_unavailable"}))
         except Exception:
             pass
