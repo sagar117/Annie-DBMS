@@ -1,7 +1,8 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .db import Base
+from sqlalchemy.sql import func
 
 class Organization(Base):
     __tablename__ = "organizations"
@@ -62,3 +63,31 @@ class Reading(Base):
 
     patient = relationship("Patient", back_populates="readings")
     call = relationship("Call", back_populates="readings")
+
+
+
+class PatientDailyReading(Base):
+    __tablename__ = "patient_daily_readings"
+    id = Column(Integer, primary_key=True, index=True)
+
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False)
+
+    # one row per patient per calendar day (UTC or your app’s canonical TZ)
+    reading_date = Column(Date, nullable=False)
+
+    # normalized fields (NULL when not reported)
+    bp_systolic = Column(Integer, nullable=True)
+    bp_diastolic = Column(Integer, nullable=True)
+    pulse = Column(Integer, nullable=True)
+    glucose = Column(Integer, nullable=True)
+    weight = Column(Integer, nullable=True)
+
+    # traceability
+    source_call_id = Column(Integer, ForeignKey("calls.id"), nullable=True)
+
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("patient_id", "reading_date", name="uq_patient_daily_reading"),
+    )

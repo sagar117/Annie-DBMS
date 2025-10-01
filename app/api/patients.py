@@ -91,9 +91,7 @@ def get_patient(patient_id: int):
 
 @router.put("/{patient_id}", response_model=schemas.PatientOut)
 def update_patient(patient_id: int, payload: Dict[str, Any], db_session: Session = Depends(get_db)):
-    """
-    Partial update of a patient. Accepts JSON with any of: patient_id, name, phone, dob, address.
-    """
+
     patient = db_session.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
@@ -111,3 +109,55 @@ def update_patient(patient_id: int, payload: Dict[str, Any], db_session: Session
         db_session.refresh(patient)
 
     return patient
+
+
+
+@router.get("/{patient_id}/daily/{reading_date}")
+def get_patient_daily_reading(patient_id: int, reading_date: str, db_session: Session = Depends(get_db)):
+    from app.models import PatientDailyReading
+    try:
+        y, m, d = map(int, reading_date.split("-"))
+        dt = datetime(y, m, d).date()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+    row = (
+        db_session.query(PatientDailyReading)
+        .filter(PatientDailyReading.patient_id == patient_id,
+                PatientDailyReading.reading_date == dt)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No daily reading for this date")
+
+    return {
+        "patient_id": patient_id,
+        "reading_date": row.reading_date.isoformat(),
+        "bp": {"systolic": row.bp_systolic, "diastolic": row.bp_diastolic},
+        "pulse": row.pulse,
+        "glucose": row.glucose,
+        "weight": row.weight,
+        "source_call_id": row.source_call_id,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+"""
+@router.put("/{patient_id}", response_model=schemas.PatientOut)
+def update_patient(patient_id: int, payload: schemas.PatientUpdate, db_session: Session = Depends(get_db)):
+    patient = db_session.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    if payload.name is not None:
+        patient.name = payload.name
+    if payload.phone is not None:
+        patient.phone = payload.phone
+    if payload.dob is not None:
+        patient.dob = payload.dob  # dob is already `date` if schema defines it as `date`
+
+    db_session.commit()
+    db_session.refresh(patient)
+    return patient
+
+"""

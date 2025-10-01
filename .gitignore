@@ -2,3 +2,7 @@ venv
 .env
 annie.db
 annie.db.bak
+sites-enabled
+sites-enabled/
+nohup.out
+__pycache__

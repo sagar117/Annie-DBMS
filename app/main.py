@@ -3,6 +3,8 @@ import logging
 import json
 import traceback
 from typing import Optional
+from dotenv import load_dotenv
+load_dotenv()
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
