@@ -26,14 +26,14 @@ app.add_middleware(
 # --- Include API routers (defensive import + logging) ---
 print("[main] starting router include check...")
 try:
-    from app.api import calls, patients, orgs  # type: ignore
+    from app.api import calls, patients, orgs, analytics  # type: ignore
     print("[main] imported app.api modules OK")
 except Exception as e:
     print("[main] failed importing app.api:", repr(e))
     traceback.print_exc()
     calls = patients = orgs = None  # type: ignore
 
-for name, mod in (("calls", calls), ("patients", patients), ("orgs", orgs)):
+for name, mod in (("calls", calls), ("patients", patients), ("orgs", orgs), ("analytics", analytics),):
     if mod is None:
         print(f"[main] router module {name} is None, skipping include")
     else:

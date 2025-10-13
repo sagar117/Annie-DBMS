@@ -1,0 +1,205 @@
+# app/api/analytics.py
+import logging
+from datetime import date as _date
+from typing import Optional, List, Dict, Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app import db
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/analytics", tags=["analytics"])
+
+
+def get_db():
+    s = db.SessionLocal()
+    try:
+        yield s
+    finally:
+        s.close()
+
+
+@router.get("/readings-collected")
+def readings_collected(
+    org_id: int = Query(..., description="Organization id"),
+    date: Optional[_date] = Query(None, description="Single day (YYYY-MM-DD)"),
+    date_from: Optional[_date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    date_to: Optional[_date] = Query(None, description="End date inclusive (YYYY-MM-DD)"),
+    db_session: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    if date and (date_from or date_to):
+        raise HTTPException(status_code=400, detail="Use either ?date= or (?date_from=&date_to=), not both.")
+
+    base_sql = """
+        SELECT date(c.created_at) AS day, c.patient_id
+        FROM calls c
+        WHERE c.org_id = :org_id
+          AND EXISTS (SELECT 1 FROM readings r WHERE r.call_id = c.id)
+    """
+    params = {"org_id": org_id}
+
+    if date:
+        base_sql += " AND date(c.created_at) = :d"
+        params["d"] = date.isoformat()
+    else:
+        if date_from:
+            base_sql += " AND date(c.created_at) >= :df"
+            params["df"] = date_from.isoformat()
+        if date_to:
+            base_sql += " AND date(c.created_at) <= :dt"
+            params["dt"] = date_to.isoformat()
+
+    final_sql = f"""
+        WITH per_call AS (
+            {base_sql}
+        )
+        SELECT day, COUNT(DISTINCT patient_id) AS patients_with_readings
+        FROM per_call
+        GROUP BY day
+        ORDER BY day ASC
+    """
+    rows = db_session.execute(text(final_sql), params).mappings().all()
+    return [{"date": r["day"], "patients_with_readings": r["patients_with_readings"]} for r in rows]
+
+
+@router.get("/completed-calls")
+def completed_calls(
+    org_id: int = Query(..., description="Organization id"),
+    date: Optional[_date] = Query(None, description="Single day (YYYY-MM-DD)"),
+    date_from: Optional[_date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    date_to: Optional[_date] = Query(None, description="End date inclusive (YYYY-MM-DD)"),
+    db_session: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    if date and (date_from or date_to):
+        raise HTTPException(status_code=400, detail="Use either ?date= or (?date_from=&date_to=), not both.")
+
+    base_sql = """
+        SELECT date(c.created_at) AS day, c.patient_id
+        FROM calls c
+        WHERE c.org_id = :org_id
+          AND c.status = 'completed'
+    """
+    params = {"org_id": org_id}
+
+    if date:
+        base_sql += " AND date(c.created_at) = :d"
+        params["d"] = date.isoformat()
+    else:
+        if date_from:
+            base_sql += " AND date(c.created_at) >= :df"
+            params["df"] = date_from.isoformat()
+        if date_to:
+            base_sql += " AND date(c.created_at) <= :dt"
+            params["dt"] = date_to.isoformat()
+
+    final_sql = f"""
+        WITH per_call AS (
+            {base_sql}
+        )
+        SELECT day, COUNT(DISTINCT patient_id) AS patients_with_completed_calls
+        FROM per_call
+        GROUP BY day
+        ORDER BY day ASC
+    """
+    rows = db_session.execute(text(final_sql), params).mappings().all()
+    return [{"date": r["day"], "patients_with_completed_calls": r["patients_with_completed_calls"]} for r in rows]
+
+
+# ---------- Combined endpoint (with totals) ----------
+def _dashboard_sql(date_filter_clause: str) -> str:
+    # Note: CTE names intentionally avoid table names to prevent SQLite circular reference errors
+    return f"""
+        WITH readings_cte AS (
+            SELECT date(c.created_at) AS day, c.patient_id
+            FROM calls c
+            WHERE c.org_id = :org_id
+              AND EXISTS (SELECT 1 FROM readings r WHERE r.call_id = c.id)
+              {date_filter_clause}
+            GROUP BY day, c.patient_id
+        ),
+        completed_cte AS (
+            SELECT date(c.created_at) AS day, c.patient_id
+            FROM calls c
+            WHERE c.org_id = :org_id
+              AND c.status = 'completed'
+              {date_filter_clause}
+            GROUP BY day, c.patient_id
+        ),
+        calls_attempted_cte AS (
+            SELECT date(c.created_at) AS day, COUNT(*) AS calls_attempted
+            FROM calls c
+            WHERE c.org_id = :org_id
+              {date_filter_clause}
+            GROUP BY day
+        ),
+        all_days_cte AS (
+            SELECT day FROM readings_cte
+            UNION
+            SELECT day FROM completed_cte
+            UNION
+            SELECT day FROM calls_attempted_cte
+        )
+        SELECT
+          d.day AS date,
+          COALESCE((SELECT COUNT(*) FROM readings_cte  r WHERE r.day = d.day), 0) AS patients_with_readings,
+          COALESCE((SELECT COUNT(*) FROM completed_cte c WHERE c.day = d.day), 0) AS patients_with_completed_calls,
+          COALESCE((SELECT a.calls_attempted FROM calls_attempted_cte a WHERE a.day = d.day), 0) AS calls_attempted
+        FROM all_days_cte d
+        ORDER BY d.day ASC
+    """
+
+
+@router.get("/dashboard_analytics")
+@router.get("/dashoard_analytics")  # alias for common typo
+def dashboard_analytics(
+    org_id: int = Query(..., description="Organization id"),
+    date: Optional[_date] = Query(None, description="Single day (YYYY-MM-DD)"),
+    date_from: Optional[_date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    date_to: Optional[_date] = Query(None, description="End date inclusive (YYYY-MM-DD)"),
+    db_session: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """
+    Per-date metrics:
+      - patients_with_readings: DISTINCT patients with ≥1 call that has readings on that date.
+      - patients_with_completed_calls: DISTINCT patients with ≥1 COMPLETED call on that date.
+      - calls_attempted: total number of calls created on that date (any status).
+      - total_patients: org-wide patient count (same for every row; convenient for dashboard math).
+    """
+    if date and (date_from or date_to):
+        raise HTTPException(status_code=400, detail="Use either ?date= or (?date_from=&date_to=), not both.")
+
+    params: Dict[str, Any] = {"org_id": org_id}
+    if date:
+        clause = " AND date(c.created_at) = :d "
+        params["d"] = date.isoformat()
+    else:
+        clause = ""
+        if date_from:
+            clause += " AND date(c.created_at) >= :df "
+            params["df"] = date_from.isoformat()
+        if date_to:
+            clause += " AND date(c.created_at) <= :dt "
+            params["dt"] = date_to.isoformat()
+
+    # total patients in org (single query)
+    total_patients = db_session.execute(
+        text("SELECT COUNT(*) FROM patients WHERE org_id = :org_id"),
+        {"org_id": org_id},
+    ).scalar()
+
+    sql = _dashboard_sql(clause)
+    rows = db_session.execute(text(sql), params).mappings().all()
+
+    # Add total_patients to each row for convenience
+    return [
+        {
+            "date": r["date"],
+            "patients_with_readings": r["patients_with_readings"],
+            "patients_with_completed_calls": r["patients_with_completed_calls"],
+            "calls_attempted": r["calls_attempted"],
+            "total_patients": total_patients,
+        }
+        for r in rows
+    ]

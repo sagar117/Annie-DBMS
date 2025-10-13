@@ -1,6 +1,6 @@
 # app/services/deepgram_handler.py
 """
-Deepgram <-> Twilio bridge with DB-first agent resolution + personalized greeting.
+Deepgram <-> Twilio bridge with DB-first agent resolution.
 
 Primary resolution order:
 1) Parse call_id from path (handles /ws/NN, /ws/call_id=NN, and percent-encoded forms)
@@ -9,10 +9,6 @@ Primary resolution order:
 
 Then it requests mu-law@8000 from Deepgram and forwards audio both ways (no PCM conversion).
 It logs at every decision point to help debug agent resolution issues.
-
-NEW:
-- If PERSONALIZED_GREETING is enabled (default), when call_id resolves to a patient,
-  Annie greets them by first name and the patient/org context is prepended to the prompt.
 """
 
 import asyncio
@@ -25,9 +21,6 @@ from typing import Optional
 
 import websockets
 from websockets.exceptions import InvalidHandshake, ConnectionClosed
-
-# Env toggle (1/true enabled; 0/false disabled)
-PERSONALIZED_GREETING = os.getenv("PERSONALIZED_GREETING", "1").lower() not in ("0", "false", "no")
 
 # Project paths
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -54,13 +47,6 @@ def load_prompt(file_path: str) -> str:
     except Exception as e:
         print("[load_prompt] failed to load prompt:", e)
         return ""
-
-
-def _first_name(full_name: Optional[str]) -> Optional[str]:
-    if not full_name:
-        return None
-    parts = [p for p in full_name.strip().split() if p]
-    return parts[0] if parts else None
 
 
 def sts_connect():
@@ -132,8 +118,6 @@ async def bridge_ws(ws, path_arg: str = None):
         print(f"[bridge_ws] error parsing path_arg for call_id: {e}")
 
     # --- Primary: DB-first agent lookup if call_id available ---
-    patient = None
-    org = None
     if call_id is not None:
         try:
             from app import db, models  # lazy import
@@ -143,12 +127,6 @@ async def bridge_ws(ws, path_arg: str = None):
                 if call_row:
                     print(f"[bridge_ws] DB lookup: found call row id={call_id} agent={getattr(call_row, 'agent', None)}")
                     agent = getattr(call_row, "agent", None)
-                    # Fetch patient + org for personalization
-                    try:
-                        patient = session.query(models.Patient).filter(models.Patient.id == call_row.patient_id).first()
-                        org = session.query(models.Organization).filter(models.Organization.id == call_row.org_id).first()
-                    except Exception as e:
-                        print(f"[bridge_ws] patient/org lookup failed: {e}")
                 else:
                     print(f"[bridge_ws] DB lookup: NO call row found for id={call_id}")
             finally:
@@ -159,7 +137,7 @@ async def bridge_ws(ws, path_arg: str = None):
     else:
         print("[bridge_ws] call_id is None; cannot fetch agent from DB as primary source")
 
-    # --- Fallback: check querystring for agent (only if DB didn't produce an agent) ---
+    # --- Fallback: check querystring for agent (only if DB didn't produce agent) ---
     if agent is None:
         try:
             agent_vals = qs.get("agent") or qs.get("Agent") or qs.get("agent_name")
@@ -173,43 +151,8 @@ async def bridge_ws(ws, path_arg: str = None):
 
     # pick prompt file
     prompt_path = prompt_file_for_agent(agent)
-    base_prompt = load_prompt(prompt_path)
+    prompt_text = load_prompt(prompt_path)
     print(f"[bridge_ws] using prompt file: {prompt_path} (exists={os.path.isfile(prompt_path)})")
-
-    # --- Personalized greeting + dynamic context block ---
-    greeting_text = "Hello"
-    dynamic_prefix = ""
-    if PERSONALIZED_GREETING and patient:
-        fname = _first_name(getattr(patient, "name", None)) or getattr(patient, "name", None)
-        if fname:
-            greeting_text = f"Hello {fname}"
-        dob_iso = None
-        try:
-            if getattr(patient, "dob", None):
-                dob_iso = patient.dob.strftime("%Y-%m-%d")
-        except Exception:
-            dob_iso = None
-        org_name = getattr(org, "name", None)
-        dyn_lines = [
-            "### PATIENT CONTEXT (do not reveal confidential details):",
-            f"- patient_legal_name: {getattr(patient, 'name', None) or 'unknown'}",
-            f"- patient_first_name: {fname or 'unknown'}",
-            f"- patient_id_internal: {getattr(patient, 'patient_id', None) or getattr(patient, 'id', None)}",
-            f"- patient_dob: {dob_iso or 'unknown'}",
-            f"- organization_name: {org_name or 'unknown'}",
-            "",
-            "### VOICE & TONE:",
-            "- Greet the patient by first name once at the start.",
-            "- Be clear, empathetic, professional; avoid repeating their name unnecessarily.",
-            "",
-            "### TASK:",
-            "- Collect vitals: BP (systolic/diastolic), pulse, glucose, weight.",
-            "- Confirm understanding and provide a brief summary.",
-            "",
-        ]
-        dynamic_prefix = "\n".join(dyn_lines)
-
-    prompt_text_final = (dynamic_prefix + (base_prompt or "You are a helpful AI nurse assisting a patient.")).strip()
 
     # --- prepare queues and persistence helpers ---
     audio_queue = asyncio.Queue()
@@ -287,10 +230,10 @@ async def bridge_ws(ws, path_arg: str = None):
                     "listen": {"provider": {"type": "deepgram", "model": "nova-3"}},
                     "think": {
                         "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.3},
-                        "prompt": prompt_text_final,
+                        "prompt": prompt_text or "You are a helpful AI nurse helping patient answer their query",
                     },
                     "speak": {"provider": {"type": "deepgram", "model": "aura-2-thalia-en"}},
-                    "greeting": greeting_text,
+                    "greeting": "Hello",
                 },
             }
             await sts_ws.send(json.dumps(config_message))

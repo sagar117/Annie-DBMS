@@ -33,44 +33,21 @@ def get_db():
 # Host normalization
 # -------------------------------
 def _normalize_host(h: str | None) -> str:
+    """
+    Accepts 'app.carify.health', 'https://app.carify.health', etc.
+    Returns netloc only e.g. 'app.carify.health[:port]'.
+    """
     if not h:
         return ""
     h = h.strip()
     if h.startswith("http://") or h.startswith("https://"):
-        return urlparse(h).netloc
+        p = urlparse(h)
+        return p.netloc
     return h
 
 
 # -------------------------------
-# Simple country detector from E.164 (+<cc>...)
-# -------------------------------
-_CC_MAP = {
-    "1": "US", "91": "IN", "44": "GB", "61": "AU", "81": "JP", "49": "DE",
-    "33": "FR", "39": "IT", "34": "ES", "971": "AE", "65": "SG", "852": "HK",
-    "86": "CN", "7": "RU", "55": "BR", "27": "ZA", "62": "ID", "82": "KR",
-    "380": "UA", "353": "IE", "351": "PT", "46": "SE", "31": "NL",
-}
-# try longest cc first
-_CC_ORDER = sorted(_CC_MAP.keys(), key=len, reverse=True)
-
-
-def _detect_country_e164(e164: str) -> Optional[str]:
-    """
-    Returns ISO-like code (e.g., 'IN','US') from an E.164 string or None.
-    """
-    if not e164 or not e164.startswith("+"):
-        return None
-    digits = e164[1:]
-    if not digits or not digits[0].isdigit():
-        return None
-    for cc in _CC_ORDER:
-        if digits.startswith(cc):
-            return _CC_MAP.get(cc)
-    return None
-
-
-# -------------------------------
-# Readings helpers (unchanged)
+# Daily readings helpers
 # -------------------------------
 def _extract_normalized_readings(parsed: dict) -> dict:
     out = {"bp_systolic": None, "bp_diastolic": None, "pulse": None, "glucose": None, "weight": None}
@@ -172,6 +149,7 @@ class _TelephonyProvider:
     name: str
 
     def create_call(self, to_number: str, from_number: str, url: str, method: str = "GET") -> Tuple[bool, Optional[str], str]:
+        """Return (ok, sid, error_text)."""
         raise NotImplementedError
 
 
@@ -203,13 +181,20 @@ class _TwilioProvider(_TelephonyProvider):
 
 
 class _SignalWireProvider(_TelephonyProvider):
+    """
+    SignalWire LaML is Twilio-compatible.
+    Auth uses PROJECT_ID as username and API_TOKEN as password.
+    Base URL: https://{SPACE}.signalwire.com/api/laml/2010-04-01/Accounts/{PROJECT_ID}/Calls.json
+    """
     name = "signalwire"
 
     def __init__(self):
         self.project_id = os.getenv("SW_PROJECT_ID") or os.getenv("SIGNALWIRE_PROJECT_ID")
         self.api_token = os.getenv("SW_API_TOKEN") or os.getenv("SIGNALWIRE_API_TOKEN")
-        self.space = os.getenv("SW_SPACE") or os.getenv("SIGNALWIRE_SPACE")  # 'myspace' or 'myspace.signalwire.com'
+        self.space = os.getenv("SW_SPACE") or os.getenv("SIGNALWIRE_SPACE")  # e.g. myspace.signalwire.com or just 'myspace'
         self.from_number = os.getenv("SW_FROM_NUMBER") or os.getenv("SIGNALWIRE_FROM_NUMBER")
+
+        # normalize space: allow 'myspace' or 'myspace.signalwire.com'
         if self.space and not self.space.endswith(".signalwire.com"):
             self.space = f"{self.space}.signalwire.com"
 
@@ -233,39 +218,11 @@ class _SignalWireProvider(_TelephonyProvider):
             return (False, None, str(e))
 
 
-def _provider_by_name(name: str) -> _TelephonyProvider:
-    n = (name or "").strip().lower()
-    if n in ("signalwire", "sw", "signal_wire"):
+def _get_provider() -> _TelephonyProvider:
+    prov = (os.getenv("TELEPHONY_PROVIDER") or "twilio").strip().lower()
+    if prov in ("signalwire", "sw", "signal_wire"):
         return _SignalWireProvider()
     return _TwilioProvider()
-
-
-def _get_default_provider() -> _TelephonyProvider:
-    prov = (os.getenv("TELEPHONY_PROVIDER") or "twilio").strip().lower()
-    return _provider_by_name(prov)
-
-
-def _select_provider_for_number(to_number: str) -> _TelephonyProvider:
-    """
-    Country-based routing if enabled:
-      - ENABLE_COUNTRY_ROUTING=true/1 enables logic.
-      - ROUTE_PROVIDER_IN: provider string for India (+91), default 'twilio'.
-      - ROUTE_PROVIDER_DEFAULT: provider string for others, default 'signalwire'.
-    Fallback to TELEPHONY_PROVIDER if disabled or detection fails.
-    """
-    enabled = (os.getenv("ENABLE_COUNTRY_ROUTING") or "").lower() in ("1", "true", "yes")
-    if not enabled:
-        return _get_default_provider()
-
-    iso = _detect_country_e164(to_number or "")
-    if iso == "IN":
-        name = os.getenv("ROUTE_PROVIDER_IN", "twilio")
-        logger.info("[routing] to=%s iso=IN -> provider=%s", to_number, name)
-        return _provider_by_name(name)
-    else:
-        name = os.getenv("ROUTE_PROVIDER_DEFAULT", "signalwire")
-        logger.info("[routing] to=%s iso=%s -> provider=%s", to_number, iso, name)
-        return _provider_by_name(name)
 
 
 # -------------------------------
@@ -293,21 +250,22 @@ def list_calls(
 
 
 # -------------------------------
-# Create outbound call (now with country routing)
+# Create outbound call (provider-agnostic)
 # -------------------------------
 @router.post("/outbound")
 def outbound_call(request: Request, payload: Dict[str, Any]):
     """
+    Create a call record and place an outbound call via Twilio or SignalWire based on TELEPHONY_PROVIDER.
     Body:
       { "org_id": <int>, "patient_id": <int>, "to_number": "+91...", "agent": "annie_RPM", "from_number": "+1..."? }
-    Returns: { "call_id": <int>, "status": "initiated", "provider": "<twilio|signalwire>" }
+    Returns: { "call_id": <int>, "status": "initiated" }
     """
     body = payload or {}
     org_id = body.get("org_id")
     patient_id = body.get("patient_id")
     to_number = body.get("to_number")
     agent = body.get("agent") or "annie_RPM"
-    from_number_override = body.get("from_number")  # optional per-call override
+    from_number_override = body.get("from_number")  # optional override per-call
 
     if not (org_id and patient_id and to_number):
         raise HTTPException(status_code=400, detail="org_id, patient_id and to_number are required")
@@ -330,24 +288,21 @@ def outbound_call(request: Request, payload: Dict[str, Any]):
         session.refresh(new_call)
         call_id = new_call.id
 
+        # Build TwiML/LaML URL
         public_host = _normalize_host(os.getenv("PUBLIC_HOST"))
         host = public_host if public_host else _normalize_host(request.url.netloc)
         twiml_url = f"https://{host}/api/calls/twiml/outbound/{call_id}?agent={html.escape(agent)}"
 
-        # Choose provider (country routing if enabled)
-        provider = _select_provider_for_number(to_number)
-
-        logger.warning("[%s] placing call To=%s From=%s Url=%s",
-                       provider.name, to_number, from_number_override or getattr(provider, "from_number", None), twiml_url)
-
+        # Choose provider
+        provider = _get_provider()
         ok, sid, err = provider.create_call(
             to_number=to_number,
-            from_number=from_number_override or "",
+            from_number=from_number_override or "",  # provider fills default if empty
             url=twiml_url,
             method="GET",
         )
         if ok and sid:
-            new_call.twilio_call_sid = sid  # reuse column for SID from either provider
+            new_call.twilio_call_sid = sid  # reuse the same column for provider call SID
             session.add(new_call)
             session.commit()
         else:
@@ -359,14 +314,16 @@ def outbound_call(request: Request, payload: Dict[str, Any]):
 
 
 # -------------------------------
-# TwiML/LaML for outbound
+# TwiML/LaML for outbound calls (GET or POST)
 # -------------------------------
 @router.api_route("/twiml/outbound/{call_id}", methods=["GET", "POST"])
 async def twiml_outbound(call_id: int, request: Request, agent: Optional[str] = None):
+    """
+    Returns TwiML/LaML. Both Twilio & SignalWire understand this.
+    """
     agent_name = request.query_params.get("agent") or agent or "annie_RPM"
     public_host = _normalize_host(os.getenv("PUBLIC_HOST"))
     host = public_host if public_host else _normalize_host(request.url.netloc)
-    # include call_id in path so WS can DB-resolve agent/patient context
     stream_url = f"wss://{host}/ws/{call_id}?agent={agent_name}"
     stream_url_escaped = stream_url.replace('"', "&quot;")
 
@@ -380,7 +337,7 @@ async def twiml_outbound(call_id: int, request: Request, agent: Optional[str] = 
 
 
 # -------------------------------
-# Complete call (unchanged)
+# Complete call: finalize + extract readings + persist + upsert daily
 # -------------------------------
 @router.post("/{call_id}/complete")
 def complete_call(call_id: int):
@@ -625,7 +582,6 @@ def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
     finally:
         session.close()
 
-
 @router.get("/by-patient/{patient_id}", response_model=List[schemas.CallOut])
 def list_calls_by_patient(
     patient_id: int,
@@ -659,3 +615,4 @@ def list_calls_by_patient(
          .all()
     )
     return rows
+
