@@ -428,14 +428,17 @@ def complete_call(call_id: int):
             logger.exception("persisting single readings failed: %s", e)
 
         # For wellcare_marketing agent, send SMS follow-up
+        logger.info("[marketing] Checking agent type: %s", call.agent)
         if call.agent == "wellcare_marketing" and call.patient_id:
             try:
                 patient = session.query(models.Patient).filter(models.Patient.id == call.patient_id).first()
                 if patient and patient.phone:
-                    logger.info("[marketing] Sending follow-up SMS to patient %s", patient.id)
+                    logger.info("[marketing] Sending follow-up SMS to patient %s (agent: %s)", patient.id, call.agent)
                     ok, err = send_marketing_sms(patient.phone)
                     if not ok:
-                        logger.error("[marketing] SMS failed: %s", err)
+                        logger.error("[marketing] SMS failed for agent %s: %s", call.agent, err)
+                else:
+                    logger.warning("[marketing] Patient %s has no phone number (agent: %s)", call.patient_id, call.agent)
             except Exception as e:
                 logger.exception("[marketing] Error in SMS flow: %s", e)
 
