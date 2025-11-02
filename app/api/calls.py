@@ -18,7 +18,10 @@ def send_marketing_sms(to_number: str) -> Tuple[bool, Optional[str]]:
     """Send Twilio SMS with HealthAssist marketing message.
     Returns (success, error_message)."""
     
+    logger.info("[marketing_sms] Starting SMS send process to %s", to_number)
+    
     if not to_number:
+        logger.error("[marketing_sms] No phone number provided")
         return False, "No phone number provided"
 
     try:
@@ -26,7 +29,13 @@ def send_marketing_sms(to_number: str) -> Tuple[bool, Optional[str]]:
         auth_token = os.getenv("TWILIO_AUTH_TOKEN")
         from_number = os.getenv("TWILIO_FROM_NUMBER")
 
+        logger.debug("[marketing_sms] Credentials check - SID: %s, From: %s", 
+                    "present" if account_sid else "missing",
+                    "present" if from_number else "missing")
+
         if not (account_sid and auth_token and from_number):
+            logger.error("[marketing_sms] Missing credentials - SID: %s, Token: %s, From: %s",
+                        bool(account_sid), bool(auth_token), bool(from_number))
             return False, "Missing Twilio credentials"
 
         message = ("Hi, this is Annie from HealthAssist.\n"
@@ -34,6 +43,8 @@ def send_marketing_sms(to_number: str) -> Tuple[bool, Optional[str]]:
                   "Special offer: $29.95/mo (use code SPECIAL).\n"
                   "www.wellcaretoday.com")
 
+        logger.info("[marketing_sms] Attempting to send SMS to %s from %s", to_number, from_number)
+        
         resp = requests.post(
             f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
             auth=(account_sid, auth_token),
@@ -44,13 +55,25 @@ def send_marketing_sms(to_number: str) -> Tuple[bool, Optional[str]]:
             },
             timeout=10
         )
-
-        if resp.status_code in (200, 201):
-            logger.info("[marketing_sms] Sent successfully to %s", to_number)
-            return True, None
         
-        logger.error("[marketing_sms] Failed to send: %s %s", resp.status_code, resp.text)
-        return False, f"SMS send failed: {resp.status_code}"
+        try:
+            response_data = resp.json()
+            logger.debug("[marketing_sms] Twilio response: %s", response_data)
+            
+            if resp.status_code in (200, 201):
+                message_sid = response_data.get('sid')
+                logger.info("[marketing_sms] Successfully sent to %s (SID: %s)", to_number, message_sid)
+                return True, None
+            
+            error_code = response_data.get('code')
+            error_message = response_data.get('message')
+            logger.error("[marketing_sms] Failed to send: Status: %s, Code: %s, Message: %s", 
+                        resp.status_code, error_code, error_message)
+            return False, f"SMS send failed: {error_code} - {error_message}"
+        except ValueError as e:
+            logger.error("[marketing_sms] Failed to parse Twilio response: %s, Response text: %s", 
+                        str(e), resp.text)
+            return False, f"SMS send failed: {resp.status_code}"
 
     except Exception as e:
         logger.exception("[marketing_sms] Error sending to %s: %s", to_number, str(e))
