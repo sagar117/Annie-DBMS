@@ -12,6 +12,50 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
+def send_marketing_sms(to_number: str) -> Tuple[bool, Optional[str]]:
+    """Send Twilio SMS with HealthAssist marketing message.
+    Returns (success, error_message)."""
+    
+    if not to_number:
+        return False, "No phone number provided"
+
+    try:
+        account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+        auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+        from_number = os.getenv("TWILIO_FROM_NUMBER")
+
+        if not (account_sid and auth_token and from_number):
+            return False, "Missing Twilio credentials"
+
+        message = ("Hi, this is Annie from HealthAssist.\n"
+                  "Upgrade from the old pendant — get your smart Samsung watch with 24/7 safety & health monitoring.\n"
+                  "Special offer: $29.95/mo (use code SPECIAL).\n"
+                  "www.wellcaretoday.com")
+
+        resp = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+            auth=(account_sid, auth_token),
+            data={
+                "To": to_number,
+                "From": from_number,
+                "Body": message
+            },
+            timeout=10
+        )
+
+        if resp.status_code in (200, 201):
+            logger.info("[marketing_sms] Sent successfully to %s", to_number)
+            return True, None
+        
+        logger.error("[marketing_sms] Failed to send: %s %s", resp.status_code, resp.text)
+        return False, f"SMS send failed: {resp.status_code}"
+
+    except Exception as e:
+        logger.exception("[marketing_sms] Error sending to %s: %s", to_number, str(e))
+        return False, f"SMS error: {str(e)}"
+
 from app import db, models, schemas
 
 logger = logging.getLogger(__name__)
@@ -359,6 +403,18 @@ def complete_call(call_id: int):
             _persist_single_readings(session, call, parsed)
         except Exception as e:
             logger.exception("persisting single readings failed: %s", e)
+
+        # For wellcare_marketing agent, send SMS follow-up
+        if call.agent == "wellcare_marketing" and call.patient_id:
+            try:
+                patient = session.query(models.Patient).filter(models.Patient.id == call.patient_id).first()
+                if patient and patient.phone:
+                    logger.info("[marketing] Sending follow-up SMS to patient %s", patient.id)
+                    ok, err = send_marketing_sms(patient.phone)
+                    if not ok:
+                        logger.error("[marketing] SMS failed: %s", err)
+            except Exception as e:
+                logger.exception("[marketing] Error in SMS flow: %s", e)
 
         return {"call_id": call.id, "status": "completed"}
     finally:
