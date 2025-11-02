@@ -9,6 +9,8 @@ class Organization(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     address = Column(String, nullable=True)
+    password = Column(String, nullable=True)
+    email = Column(String, nullable=True, index=True)  # unique via index created above
     logo = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -20,9 +22,12 @@ class Patient(Base):
     id = Column(Integer, primary_key=True, index=True)
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
     patient_id = Column(String, nullable=False, unique=True)
+    fname = Column(String, nullable = True)
+    lname = Column(String, nullable = True)
     name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
     dob = Column(DateTime, nullable=True)
+    email = Column(String, nullable=True, index=True)  # <-- NEW
     created_at = Column(DateTime, default=datetime.utcnow)
 
     org = relationship("Organization", back_populates="patients")

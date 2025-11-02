@@ -9,24 +9,15 @@ load_dotenv()
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-#from app.api import email_transcripts  # add import
+from app.api import email_transcripts  # add import
 
-#app.include_router(email_transcripts.router)  # include router
+app.include_router(email_transcripts.router)  # include router
 
 
 logger = logging.getLogger("annie.main")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Annie Backend")
-
-from app.api import email_transcripts  # add import
-from app.api import auth
-from app.api import patients_import
-app.include_router(patients_import.router)
-
-app.include_router(auth.router)
-app.include_router(email_transcripts.router)  # include router
-
 
 # CORS (adjust allowed_origins for production)
 app.add_middleware(

@@ -209,7 +209,7 @@ async def bridge_ws(ws, path_arg: str = None):
         ]
         dynamic_prefix = "\n".join(dyn_lines)
 
-    prompt_text_final = (dynamic_prefix + (base_prompt or "You are a helpful AI nurse assisting a patient.")).strip()
+   # prompt_text_final = (dynamic_prefix + (base_prompt or "You are a helpful AI nurse assisting a patient.")).strip()
 
     # --- prepare queues and persistence helpers ---
     audio_queue = asyncio.Queue()
@@ -287,10 +287,10 @@ async def bridge_ws(ws, path_arg: str = None):
                     "listen": {"provider": {"type": "deepgram", "model": "nova-3"}},
                     "think": {
                         "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.3},
-                        "prompt": prompt_text_final,
+                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip(),
                     },
                     "speak": {"provider": {"type": "deepgram", "model": "aura-2-thalia-en"}},
-                    "greeting": greeting_text,
+   #                 "greeting": greeting_text,
                 },
             }
             await sts_ws.send(json.dumps(config_message))

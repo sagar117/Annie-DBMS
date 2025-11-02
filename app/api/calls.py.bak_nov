@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, date as _date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app import db, models, schemas
@@ -253,69 +253,6 @@ async def twiml_outbound(call_id: int, request: Request, agent: Optional[str] = 
 
 
 # -------------------------------
-# Helper: persist single 'readings' row (delete old 'summary'/'readings')
-# -------------------------------
-def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
-    """
-    Normalize `parsed` and persist exactly one row in readings table:
-      - reading_type = 'readings'
-      - value = JSON string: {"value": <to_store>}
-    Deletes previous rows for this call with types 'summary' or 'readings' to keep single-row invariant.
-    """
-    try:
-        # Determine what to store
-        to_store = None
-        if parsed is None:
-            to_store = []
-        elif isinstance(parsed, dict) and parsed.get("readings") is not None:
-            to_store = parsed.get("readings")
-        elif isinstance(parsed, (dict, list)):
-            to_store = parsed
-        else:
-            # scalar or unknown -> wrap in list
-            to_store = [parsed]
-
-        # Normalize empty dict -> empty list for consistency
-        if isinstance(to_store, dict) and not to_store:
-            to_store = []
-
-        # Delete any existing rows of type 'summary' or 'readings' for this call
-        try:
-            session.query(models.Reading).filter(models.Reading.call_id == call.id,
-                                                 models.Reading.reading_type.in_(["summary", "readings"])
-                                                 ).delete(synchronize_session=False)
-            session.commit()
-        except Exception:
-            session.rollback()
-
-        # Always persist a single 'readings' row (even if empty list)
-        row_value = to_store
-        # ensure JSON-serializable: wrap scalars into {"value": scalar} earlier; lists/dicts kept as-is
-        if not isinstance(row_value, (dict, list)):
-            row_value = {"value": row_value}
-
-        now = datetime.utcnow()
-        rd = models.Reading(
-            patient_id=call.patient_id,
-            call_id=call.id,
-            reading_type="readings",
-            value=_json.dumps({"value": row_value}),
-            units=None,
-            raw_text=str(row_value),
-            recorded_at=call.end_time or call.start_time or now,
-            created_at=now,
-        )
-        session.add(rd)
-        session.commit()
-    except Exception as e:
-        try:
-            session.rollback()
-        except Exception:
-            pass
-        logger.exception("persist_single_readings failed: %s", e)
-
-
-# -------------------------------
 # Complete call (persist readings only)
 # -------------------------------
 @router.post("/{call_id}/complete")
@@ -345,7 +282,7 @@ def complete_call(call_id: int):
         except Exception as e:
             logger.exception("openai extraction failed: %s", e)
 
-        # Save parsed summary into call.summary (optional) but DO NOT create 'summary' reading rows.
+        # Save parsed summary if present
         try:
             if isinstance(parsed, dict) and parsed.get("summary"):
                 call.summary = ((call.summary or "") + "\n[auto_summary] " + str(parsed["summary"]))[:8000]
@@ -354,11 +291,46 @@ def complete_call(call_id: int):
         except Exception as e:
             logger.exception("saving parsed summary failed: %s", e)
 
-        # Persist parsed readings into a single readings row
+        # Persist readings into `readings` table (dict or list)
         try:
-            _persist_single_readings(session, call, parsed)
+            readings = None
+            if isinstance(parsed, dict) and parsed.get("readings"):
+                readings = parsed["readings"]
+            elif isinstance(parsed, dict):
+                readings = parsed
+            elif isinstance(parsed, list):
+                readings = parsed
+
+            if readings:
+                if isinstance(readings, dict):
+                    for key, val in readings.items():
+                        if val is None:
+                            continue
+                        row = models.Reading(
+                            patient_id=call.patient_id,
+                            call_id=call.id,
+                            reading_type=str(key),
+                            value=_json.dumps(val if isinstance(val, dict) else {"value": val}),
+                            units=None,
+                            raw_text=str(val),
+                            recorded_at=call.end_time or call.start_time or datetime.utcnow(),
+                        )
+                        session.add(row)
+                else:
+                    for r in readings:
+                        row = models.Reading(
+                            patient_id=call.patient_id,
+                            call_id=call.id,
+                            reading_type=(r.get("type") or "unknown"),
+                            value=_json.dumps(r),
+                            units=r.get("units"),
+                            raw_text=str(r),
+                            recorded_at=r.get("recorded_at") or (call.end_time or call.start_time or datetime.utcnow()),
+                        )
+                        session.add(row)
+                session.commit()
         except Exception as e:
-            logger.exception("persisting single readings failed: %s", e)
+            logger.exception("persisting readings failed: %s", e)
 
         return {"call_id": call.id, "status": "completed"}
     finally:
@@ -435,16 +407,50 @@ def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
             if not persist_if_missing:
                 return {"call_id": call_id, "from_db": False, "readings": {}}
 
-        if persist_if_missing:
+        if persist_if_missing and parsed:
             try:
-                _persist_single_readings(session, call, parsed)
+                readings = None
+                if isinstance(parsed, dict) and parsed.get("readings"):
+                    readings = parsed["readings"]
+                elif isinstance(parsed, dict):
+                    readings = parsed
+                elif isinstance(parsed, list):
+                    readings = parsed
+
+                if readings:
+                    if isinstance(readings, dict):
+                        for key, val in readings.items():
+                            if val is None:
+                                continue
+                            row = models.Reading(
+                                patient_id=call.patient_id,
+                                call_id=call.id,
+                                reading_type=str(key),
+                                value=_json.dumps(val if isinstance(val, dict) else {"value": val}),
+                                units=None,
+                                raw_text=str(val),
+                                recorded_at=call.end_time or call.start_time or datetime.utcnow(),
+                            )
+                            session.add(row)
+                    else:
+                        for r in readings:
+                            row = models.Reading(
+                                patient_id=call.patient_id,
+                                call_id=call.id,
+                                reading_type=(r.get("type") or "unknown"),
+                                value=_json.dumps(r),
+                                units=r.get("units"),
+                                raw_text=str(r),
+                                recorded_at=r.get("recorded_at") or (call.end_time or call.start_time or datetime.utcnow()),
+                            )
+                            session.add(row)
+                    session.commit()
             except Exception as e:
                 logger.exception("persist parsed readings (get_call_readings) failed: %s", e)
 
         return {"call_id": call_id, "from_db": False, "readings": parsed or {}}
     finally:
         session.close()
-
 
 @router.get("/by-patient/{patient_id}", response_model=List[schemas.CallOut])
 def list_calls_by_patient(

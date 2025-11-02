@@ -18,11 +18,24 @@ def get_db():
 
 @router.post("/", response_model=schemas.OrgOut)
 def create_org(payload: schemas.OrgCreate, db_session: Session = Depends(get_db)):
-    org = models.Organization(name=payload.name, address=payload.address, logo=payload.logo)
+    import bcrypt
+
+    hashed_password = None
+    if payload.password:
+        hashed_password = bcrypt.hashpw(payload.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+    org = models.Organization(
+        name=payload.name,
+        address=payload.address,
+        email=payload.email,
+        password=hashed_password,
+        logo=payload.logo,
+    )
     db_session.add(org)
     db_session.commit()
     db_session.refresh(org)
     return org
+
 
 
 @router.get("/", response_model=List[schemas.OrgOut])
@@ -69,20 +82,30 @@ def org_stats(
     }
 
 
+
 @router.put("/{org_id}", response_model=schemas.OrgOut)
 def update_org(org_id: int, payload: Dict[str, Any], db_session: Session = Depends(get_db)):
     """
-    Partial update of an organization. Accepts JSON with any of: name, address, logo.
+    Partial update of an organization. Accepts JSON with any of:
+    name, address, logo, email, password.
+    Password is hashed before saving.
     """
     org = db_session.query(models.Organization).filter(models.Organization.id == org_id).first()
     if not org:
         raise HTTPException(status_code=404, detail="Org not found")
 
-    allowed = {"name", "address", "logo"}
+    allowed = {"name", "address", "password", "email", "logo"}
     updated = False
+
+    import bcrypt
+
     for k, v in payload.items():
         if k in allowed:
-            setattr(org, k, v)
+            if k == "password" and v:  # hash only if password provided
+                hashed = bcrypt.hashpw(v.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                setattr(org, k, hashed)
+            else:
+                setattr(org, k, v)
             updated = True
 
     if updated:
@@ -91,3 +114,4 @@ def update_org(org_id: int, payload: Dict[str, Any], db_session: Session = Depen
         db_session.refresh(org)
 
     return org
+

@@ -2,14 +2,14 @@
 import logging
 import html
 import os
-import requests
 import json as _json
-from urllib.parse import urlparse
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, date as _date
+from urllib.parse import urlparse
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app import db, models, schemas
@@ -45,16 +45,24 @@ def _normalize_host(h: str | None) -> str:
 # Simple country detector from E.164 (+<cc>...)
 # -------------------------------
 _CC_MAP = {
-    "91": "IN", "1": "US", "44": "GB", "61": "AU", "81": "JP", "49": "DE",
+    "1": "US", "91": "IN", "44": "GB", "61": "AU", "81": "JP", "49": "DE",
     "33": "FR", "39": "IT", "34": "ES", "971": "AE", "65": "SG", "852": "HK",
+    "86": "CN", "7": "RU", "55": "BR", "27": "ZA", "62": "ID", "82": "KR",
+    "380": "UA", "353": "IE", "351": "PT", "46": "SE", "31": "NL",
 }
+# try longest cc first
 _CC_ORDER = sorted(_CC_MAP.keys(), key=len, reverse=True)
 
 
 def _detect_country_e164(e164: str) -> Optional[str]:
+    """
+    Returns ISO-like code (e.g., 'IN','US') from an E.164 string or None.
+    """
     if not e164 or not e164.startswith("+"):
         return None
     digits = e164[1:]
+    if not digits or not digits[0].isdigit():
+        return None
     for cc in _CC_ORDER:
         if digits.startswith(cc):
             return _CC_MAP.get(cc)
@@ -62,16 +70,114 @@ def _detect_country_e164(e164: str) -> Optional[str]:
 
 
 # -------------------------------
+# Readings helpers (unchanged)
+# -------------------------------
+def _extract_normalized_readings(parsed: dict) -> dict:
+    out = {"bp_systolic": None, "bp_diastolic": None, "pulse": None, "glucose": None, "weight": None}
+    if not parsed:
+        return out
+    src = parsed.get("readings", parsed)
+    if isinstance(src, dict):
+        bp = src.get("bp") or src.get("blood_pressure")
+        if isinstance(bp, dict):
+            try:
+                if bp.get("systolic") is not None:
+                    out["bp_systolic"] = int(float(bp.get("systolic")))
+            except Exception:
+                pass
+            try:
+                if bp.get("diastolic") is not None:
+                    out["bp_diastolic"] = int(float(bp.get("diastolic")))
+            except Exception:
+                pass
+        for k_api, k_norm in (("pulse", "pulse"), ("glucose", "glucose"), ("weight", "weight")):
+            v = src.get(k_api)
+            if v is not None:
+                try:
+                    out[k_norm] = int(float(v))
+                except Exception:
+                    pass
+    if isinstance(src, list):
+        for item in src:
+            typ = (item.get("type") or "").lower()
+            if "bp" in typ or "blood" in typ:
+                try:
+                    if item.get("systolic") is not None:
+                        out["bp_systolic"] = int(float(item.get("systolic")))
+                    if item.get("diastolic") is not None:
+                        out["bp_diastolic"] = int(float(item.get("diastolic")))
+                except Exception:
+                    pass
+            elif "pulse" in typ:
+                try:
+                    out["pulse"] = int(float(item.get("value")))
+                except Exception:
+                    pass
+            elif "glucose" in typ:
+                try:
+                    out["glucose"] = int(float(item.get("value")))
+                except Exception:
+                    pass
+            elif "weight" in typ:
+                try:
+                    out["weight"] = int(float(item.get("value")))
+                except Exception:
+                    pass
+    return out
+
+
+def _upsert_daily_reading(session: Session, org_id: int, patient_id: int, call_id: int,
+                          call_dt: Optional[datetime], normalized: dict):
+    from app.models import PatientDailyReading
+    reading_date = (call_dt.date() if call_dt else datetime.utcnow().date())
+    if all(normalized.get(k) is None for k in ("bp_systolic", "bp_diastolic", "pulse", "glucose", "weight")):
+        return
+    row = (
+        session.query(PatientDailyReading)
+        .filter(PatientDailyReading.patient_id == patient_id,
+                PatientDailyReading.reading_date == reading_date)
+        .first()
+    )
+    if row:
+        changed = False
+        for k in ("bp_systolic", "bp_diastolic", "pulse", "glucose", "weight"):
+            v = normalized.get(k)
+            if v is not None and getattr(row, k) != v:
+                setattr(row, k, v)
+                changed = True
+        row.source_call_id = call_id
+        if changed:
+            session.add(row)
+            session.commit()
+    else:
+        row = PatientDailyReading(
+            org_id=org_id,
+            patient_id=patient_id,
+            reading_date=reading_date,
+            bp_systolic=normalized.get("bp_systolic"),
+            bp_diastolic=normalized.get("bp_diastolic"),
+            pulse=normalized.get("pulse"),
+            glucose=normalized.get("glucose"),
+            weight=normalized.get("weight"),
+            source_call_id=call_id,
+        )
+        session.add(row)
+        session.commit()
+
+
+# -------------------------------
 # Telephony provider abstraction
 # -------------------------------
 class _TelephonyProvider:
     name: str
+
     def create_call(self, to_number: str, from_number: str, url: str, method: str = "GET") -> Tuple[bool, Optional[str], str]:
         raise NotImplementedError
 
 
 class _TwilioProvider(_TelephonyProvider):
     name = "twilio"
+
     def __init__(self):
         self.sid = os.getenv("TWILIO_ACCOUNT_SID")
         self.token = os.getenv("TWILIO_AUTH_TOKEN")
@@ -98,10 +204,11 @@ class _TwilioProvider(_TelephonyProvider):
 
 class _SignalWireProvider(_TelephonyProvider):
     name = "signalwire"
+
     def __init__(self):
         self.project_id = os.getenv("SW_PROJECT_ID") or os.getenv("SIGNALWIRE_PROJECT_ID")
         self.api_token = os.getenv("SW_API_TOKEN") or os.getenv("SIGNALWIRE_API_TOKEN")
-        self.space = os.getenv("SW_SPACE") or os.getenv("SIGNALWIRE_SPACE")
+        self.space = os.getenv("SW_SPACE") or os.getenv("SIGNALWIRE_SPACE")  # 'myspace' or 'myspace.signalwire.com'
         self.from_number = os.getenv("SW_FROM_NUMBER") or os.getenv("SIGNALWIRE_FROM_NUMBER")
         if self.space and not self.space.endswith(".signalwire.com"):
             self.space = f"{self.space}.signalwire.com"
@@ -134,23 +241,31 @@ def _provider_by_name(name: str) -> _TelephonyProvider:
 
 
 def _get_default_provider() -> _TelephonyProvider:
-    return _provider_by_name((os.getenv("TELEPHONY_PROVIDER") or "twilio").strip().lower())
+    prov = (os.getenv("TELEPHONY_PROVIDER") or "twilio").strip().lower()
+    return _provider_by_name(prov)
 
 
 def _select_provider_for_number(to_number: str) -> _TelephonyProvider:
     """
-    Country-based routing if enabled via env:
-      - ENABLE_COUNTRY_ROUTING=1/true
-      - ROUTE_PROVIDER_IN=twilio (default)
-      - ROUTE_PROVIDER_DEFAULT=signalwire (default)
+    Country-based routing if enabled:
+      - ENABLE_COUNTRY_ROUTING=true/1 enables logic.
+      - ROUTE_PROVIDER_IN: provider string for India (+91), default 'twilio'.
+      - ROUTE_PROVIDER_DEFAULT: provider string for others, default 'signalwire'.
+    Fallback to TELEPHONY_PROVIDER if disabled or detection fails.
     """
     enabled = (os.getenv("ENABLE_COUNTRY_ROUTING") or "").lower() in ("1", "true", "yes")
     if not enabled:
         return _get_default_provider()
+
     iso = _detect_country_e164(to_number or "")
     if iso == "IN":
-        return _provider_by_name(os.getenv("ROUTE_PROVIDER_IN", "twilio"))
-    return _provider_by_name(os.getenv("ROUTE_PROVIDER_DEFAULT", "signalwire"))
+        name = os.getenv("ROUTE_PROVIDER_IN", "twilio")
+        logger.info("[routing] to=%s iso=IN -> provider=%s", to_number, name)
+        return _provider_by_name(name)
+    else:
+        name = os.getenv("ROUTE_PROVIDER_DEFAULT", "signalwire")
+        logger.info("[routing] to=%s iso=%s -> provider=%s", to_number, iso, name)
+        return _provider_by_name(name)
 
 
 # -------------------------------
@@ -173,20 +288,26 @@ def list_calls(
         q = q.filter(models.Call.created_at >= from_date)
     if to_date:
         q = q.filter(models.Call.created_at <= to_date)
-    return q.order_by(models.Call.created_at.desc()).all()
+    rows = q.order_by(models.Call.created_at.desc()).all()
+    return rows
 
 
 # -------------------------------
-# Create outbound call (country routing + PUBLIC_HOST)
+# Create outbound call (now with country routing)
 # -------------------------------
 @router.post("/outbound")
 def outbound_call(request: Request, payload: Dict[str, Any]):
+    """
+    Body:
+      { "org_id": <int>, "patient_id": <int>, "to_number": "+91...", "agent": "annie_RPM", "from_number": "+1..."? }
+    Returns: { "call_id": <int>, "status": "initiated", "provider": "<twilio|signalwire>" }
+    """
     body = payload or {}
     org_id = body.get("org_id")
     patient_id = body.get("patient_id")
     to_number = body.get("to_number")
     agent = body.get("agent") or "annie_RPM"
-    from_number_override = body.get("from_number")
+    from_number_override = body.get("from_number")  # optional per-call override
 
     if not (org_id and patient_id and to_number):
         raise HTTPException(status_code=400, detail="org_id, patient_id and to_number are required")
@@ -213,8 +334,11 @@ def outbound_call(request: Request, payload: Dict[str, Any]):
         host = public_host if public_host else _normalize_host(request.url.netloc)
         twiml_url = f"https://{host}/api/calls/twiml/outbound/{call_id}?agent={html.escape(agent)}"
 
+        # Choose provider (country routing if enabled)
         provider = _select_provider_for_number(to_number)
-        logger.info("[outbound] provider=%s to=%s url=%s", provider.name, to_number, twiml_url)
+
+        logger.warning("[%s] placing call To=%s From=%s Url=%s",
+                       provider.name, to_number, from_number_override or getattr(provider, "from_number", None), twiml_url)
 
         ok, sid, err = provider.create_call(
             to_number=to_number,
@@ -223,7 +347,7 @@ def outbound_call(request: Request, payload: Dict[str, Any]):
             method="GET",
         )
         if ok and sid:
-            new_call.twilio_call_sid = sid  # reuse column for either provider
+            new_call.twilio_call_sid = sid  # reuse column for SID from either provider
             session.add(new_call)
             session.commit()
         else:
@@ -242,81 +366,21 @@ async def twiml_outbound(call_id: int, request: Request, agent: Optional[str] = 
     agent_name = request.query_params.get("agent") or agent or "annie_RPM"
     public_host = _normalize_host(os.getenv("PUBLIC_HOST"))
     host = public_host if public_host else _normalize_host(request.url.netloc)
+    # include call_id in path so WS can DB-resolve agent/patient context
     stream_url = f"wss://{host}/ws/{call_id}?agent={agent_name}"
+    stream_url_escaped = stream_url.replace('"', "&quot;")
+
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="{stream_url.replace('"','&quot;')}"/>
+    <Stream url="{stream_url_escaped}"/>
   </Connect>
 </Response>"""
     return Response(content=twiml, media_type="application/xml")
 
 
 # -------------------------------
-# Helper: persist single 'readings' row (delete old 'summary'/'readings')
-# -------------------------------
-def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
-    """
-    Normalize `parsed` and persist exactly one row in readings table:
-      - reading_type = 'readings'
-      - value = JSON string: {"value": <to_store>}
-    Deletes previous rows for this call with types 'summary' or 'readings' to keep single-row invariant.
-    """
-    try:
-        # Determine what to store
-        to_store = None
-        if parsed is None:
-            to_store = []
-        elif isinstance(parsed, dict) and parsed.get("readings") is not None:
-            to_store = parsed.get("readings")
-        elif isinstance(parsed, (dict, list)):
-            to_store = parsed
-        else:
-            # scalar or unknown -> wrap in list
-            to_store = [parsed]
-
-        # Normalize empty dict -> empty list for consistency
-        if isinstance(to_store, dict) and not to_store:
-            to_store = []
-
-        # Delete any existing rows of type 'summary' or 'readings' for this call
-        try:
-            session.query(models.Reading).filter(models.Reading.call_id == call.id,
-                                                 models.Reading.reading_type.in_(["summary", "readings"])
-                                                 ).delete(synchronize_session=False)
-            session.commit()
-        except Exception:
-            session.rollback()
-
-        # Always persist a single 'readings' row (even if empty list)
-        row_value = to_store
-        # ensure JSON-serializable: wrap scalars into {"value": scalar} earlier; lists/dicts kept as-is
-        if not isinstance(row_value, (dict, list)):
-            row_value = {"value": row_value}
-
-        now = datetime.utcnow()
-        rd = models.Reading(
-            patient_id=call.patient_id,
-            call_id=call.id,
-            reading_type="readings",
-            value=_json.dumps({"value": row_value}),
-            units=None,
-            raw_text=str(row_value),
-            recorded_at=call.end_time or call.start_time or now,
-            created_at=now,
-        )
-        session.add(rd)
-        session.commit()
-    except Exception as e:
-        try:
-            session.rollback()
-        except Exception:
-            pass
-        logger.exception("persist_single_readings failed: %s", e)
-
-
-# -------------------------------
-# Complete call (persist readings only)
+# Complete call (unchanged)
 # -------------------------------
 @router.post("/{call_id}/complete")
 def complete_call(call_id: int):
@@ -326,16 +390,30 @@ def complete_call(call_id: int):
         if not call:
             raise HTTPException(status_code=404, detail="Call not found")
 
-        if call.status != "completed":
-            call.end_time = call.end_time or datetime.utcnow()
-            call.status = "completed"
-            if call.start_time and call.end_time:
-                try:
-                    call.duration_seconds = int((call.end_time - call.start_time).total_seconds())
-                except Exception:
-                    call.duration_seconds = None
-            session.add(call)
-            session.commit()
+        if call.status == "completed":
+            try:
+                parsed = {}
+                if call.summary or call.transcript:
+                    from app.services import openai_client
+                    parsed = openai_client.extract_readings_from_transcript(
+                        (call.transcript or "") + "\n" + (call.summary or "")
+                    ) or {}
+                normalized = _extract_normalized_readings(parsed if isinstance(parsed, dict) else {})
+                call_dt = call.end_time or call.start_time or datetime.utcnow()
+                _upsert_daily_reading(session, call.org_id, call.patient_id, call.id, call_dt, normalized)
+            except Exception as e:
+                logger.exception("daily upsert on already_completed failed: %s", e)
+            return {"call_id": call.id, "status": "already_completed"}
+
+        call.end_time = call.end_time or datetime.utcnow()
+        call.status = "completed"
+        if call.start_time and call.end_time:
+            try:
+                call.duration_seconds = int((call.end_time - call.start_time).total_seconds())
+            except Exception:
+                call.duration_seconds = None
+        session.add(call)
+        session.commit()
 
         transcript_text = (call.transcript or "") + "\n" + (call.summary or "")
         parsed = {}
@@ -345,7 +423,6 @@ def complete_call(call_id: int):
         except Exception as e:
             logger.exception("openai extraction failed: %s", e)
 
-        # Save parsed summary into call.summary (optional) but DO NOT create 'summary' reading rows.
         try:
             if isinstance(parsed, dict) and parsed.get("summary"):
                 call.summary = ((call.summary or "") + "\n[auto_summary] " + str(parsed["summary"]))[:8000]
@@ -354,11 +431,52 @@ def complete_call(call_id: int):
         except Exception as e:
             logger.exception("saving parsed summary failed: %s", e)
 
-        # Persist parsed readings into a single readings row
         try:
-            _persist_single_readings(session, call, parsed)
+            readings = None
+            if isinstance(parsed, dict) and parsed.get("readings"):
+                readings = parsed["readings"]
+            elif isinstance(parsed, dict):
+                readings = parsed
+            elif isinstance(parsed, List) or isinstance(parsed, list):
+                readings = parsed
+
+            if readings:
+                if isinstance(readings, dict):
+                    for key, val in readings.items():
+                        if val is None:
+                            continue
+                        row = models.Reading(
+                            patient_id=call.patient_id,
+                            call_id=call.id,
+                            reading_type=str(key),
+                            value=_json.dumps(val if isinstance(val, dict) else {"value": val}),
+                            units=None,
+                            raw_text=str(val),
+                            recorded_at=call.end_time or call.start_time or datetime.utcnow(),
+                        )
+                        session.add(row)
+                else:
+                    for r in readings:
+                        row = models.Reading(
+                            patient_id=call.patient_id,
+                            call_id=call.id,
+                            reading_type=(r.get("type") or "unknown"),
+                            value=_json.dumps(r),
+                            units=r.get("units"),
+                            raw_text=str(r),
+                            recorded_at=r.get("recorded_at") or (call.end_time or call.start_time or datetime.utcnow()),
+                        )
+                        session.add(row)
+                session.commit()
         except Exception as e:
-            logger.exception("persisting single readings failed: %s", e)
+            logger.exception("persisting detailed readings failed: %s", e)
+
+        try:
+            normalized = _extract_normalized_readings(parsed if isinstance(parsed, dict) else {})
+            call_dt = call.end_time or call.start_time or datetime.utcnow()
+            _upsert_daily_reading(session, call.org_id, call.patient_id, call.id, call_dt, normalized)
+        except Exception as e:
+            logger.exception("daily reading upsert failed: %s", e)
 
         return {"call_id": call.id, "status": "completed"}
     finally:
@@ -394,7 +512,23 @@ def get_call(call_id: int):
 
 
 # -------------------------------
-# Readings for a call (persist if missing = default)
+# Transcript
+# -------------------------------
+@router.get("/{call_id}/transcript")
+def get_transcript(call_id: int):
+    session = db.SessionLocal()
+    try:
+        call = session.query(models.Call).filter(models.Call.id == call_id).first()
+        if not call:
+            raise HTTPException(status_code=404, detail="Call not found")
+        text = (call.transcript or "").strip()
+        return PlainTextResponse(text or "(empty)")
+    finally:
+        session.close()
+
+
+# -------------------------------
+# Readings for a call
 # -------------------------------
 @router.get("/{call_id}/readings")
 def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
@@ -405,21 +539,26 @@ def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
             out = {}
             for r in rows:
                 try:
-                    val = _json.loads(r.value) if r.value else None
+                    val = None
+                    if r.value:
+                        try:
+                            val = _json.loads(r.value)
+                        except Exception:
+                            val = r.value
+                    out.setdefault(r.reading_type, []).append(
+                        {
+                            "id": r.id,
+                            "patient_id": r.patient_id,
+                            "call_id": r.call_id,
+                            "reading_type": r.reading_type,
+                            "value": val,
+                            "raw_text": r.raw_text,
+                            "units": r.units,
+                            "recorded_at": r.recorded_at.isoformat() if getattr(r, "recorded_at", None) else None,
+                        }
+                    )
                 except Exception:
-                    val = r.value
-                out.setdefault(r.reading_type, []).append(
-                    {
-                        "id": r.id,
-                        "patient_id": r.patient_id,
-                        "call_id": r.call_id,
-                        "reading_type": r.reading_type,
-                        "value": val,
-                        "raw_text": r.raw_text,
-                        "units": r.units,
-                        "recorded_at": r.recorded_at.isoformat() if getattr(r, "recorded_at", None) else None,
-                    }
-                )
+                    out.setdefault("unknown", []).append({"id": getattr(r, "id", None), "raw": str(r)})
             return {"call_id": call_id, "from_db": True, "readings": out}
 
         call = session.query(models.Call).filter(models.Call.id == call_id).first()
@@ -435,11 +574,52 @@ def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
             if not persist_if_missing:
                 return {"call_id": call_id, "from_db": False, "readings": {}}
 
-        if persist_if_missing:
+        if persist_if_missing and parsed:
             try:
-                _persist_single_readings(session, call, parsed)
+                readings = None
+                if isinstance(parsed, dict) and parsed.get("readings"):
+                    readings = parsed["readings"]
+                elif isinstance(parsed, dict):
+                    readings = parsed
+                elif isinstance(parsed, list):
+                    readings = parsed
+                if readings:
+                    if isinstance(readings, dict):
+                        for key, val in readings.items():
+                            if val is None:
+                                continue
+                            row = models.Reading(
+                                patient_id=call.patient_id,
+                                call_id=call.id,
+                                reading_type=str(key),
+                                value=_json.dumps(val if isinstance(val, dict) else {"value": val}),
+                                units=None,
+                                raw_text=str(val),
+                                recorded_at=call.end_time or call.start_time or datetime.utcnow(),
+                            )
+                            session.add(row)
+                    else:
+                        for r in readings:
+                            row = models.Reading(
+                                patient_id=call.patient_id,
+                                call_id=call.id,
+                                reading_type=(r.get("type") or "unknown"),
+                                value=_json.dumps(r),
+                                units=r.get("units"),
+                                raw_text=str(r),
+                                recorded_at=r.get("recorded_at") or (call.end_time or call.start_time or datetime.utcnow()),
+                            )
+                            session.add(row)
+                    session.commit()
             except Exception as e:
                 logger.exception("persist parsed readings (get_call_readings) failed: %s", e)
+
+            try:
+                normalized = _extract_normalized_readings(parsed if isinstance(parsed, dict) else {})
+                call_dt = call.end_time or call.start_time or datetime.utcnow()
+                _upsert_daily_reading(session, call.org_id, call.patient_id, call.id, call_dt, normalized)
+            except Exception as e:
+                logger.exception("daily upsert from get_call_readings failed: %s", e)
 
         return {"call_id": call_id, "from_db": False, "readings": parsed or {}}
     finally:
