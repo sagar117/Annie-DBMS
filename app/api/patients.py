@@ -34,6 +34,9 @@ def create_patient(p_in: schemas.PatientCreate, db_session: Session = Depends(ge
         phone=p_in.phone,
         dob=p_in.dob,
         email=p_in.email,
+        caregiver_name=p_in.caregiver_name,
+        caregiver_email=str(p_in.caregiver_email) if p_in.caregiver_email else None,
+        caregiver_phone=p_in.caregiver_phone,
     )
     db_session.add(patient)
     db_session.commit()
@@ -99,7 +102,7 @@ def update_patient(patient_id: int, payload: Dict[str, Any], db_session: Session
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    allowed = {"patient_id", "name","fname","lname", "phone", "dob","address","email"}
+    allowed = {"patient_id", "name","fname","lname", "phone", "dob","address","email", "caregiver_name", "caregiver_email", "caregiver_phone"}
     updated = False
     for k, v in payload.items():
         if k in allowed:

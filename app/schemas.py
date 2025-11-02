@@ -28,6 +28,9 @@ class PatientCreate(BaseModel):
     phone: Optional[str] = None
     dob: Optional[datetime] = None
     email: str | None = None 
+    caregiver_name: Optional[str] = None
+    caregiver_email: Optional[EmailStr] = None
+    caregiver_phone: Optional[str] = None
 
 class PatientOut(BaseModel):
     id: int
@@ -39,6 +42,9 @@ class PatientOut(BaseModel):
     phone: Optional[str]
     dob: Optional[datetime]
     email: str | None = None 
+    caregiver_name: Optional[str] = None
+    caregiver_email: Optional[EmailStr] = None
+    caregiver_phone: Optional[str] = None
     class Config:
         orm_mode = True
 
@@ -73,6 +79,32 @@ class ReadingOut(BaseModel):
     units: Optional[str]
     recorded_at: Optional[datetime]
     raw_text: Optional[str]
+
+    class Config:
+        orm_mode = True
+
+
+class RoleCreate(BaseModel):
+    org_id: int
+    first_name: str
+    last_name: Optional[str] = None
+    role: str
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    password: Optional[str] = None
+    address: Optional[str] = None
+
+
+class RoleOut(BaseModel):
+    id: int
+    org_id: int
+    first_name: str
+    last_name: Optional[str]
+    role: str
+    email: Optional[EmailStr]
+    phone: Optional[str]
+    address: Optional[str]
+    created_at: Optional[datetime]
 
     class Config:
         orm_mode = True

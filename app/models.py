@@ -16,6 +16,8 @@ class Organization(Base):
 
     patients = relationship("Patient", back_populates="org")
     calls = relationship("Call", back_populates="org")
+    # Roles (users) belonging to this organization (e.g., Admin, Nurse)
+    roles = relationship("Role", back_populates="org")
 
 class Patient(Base):
     __tablename__ = "patients"
@@ -26,6 +28,10 @@ class Patient(Base):
     lname = Column(String, nullable = True)
     name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
+    # Caregiver contact info
+    caregiver_name = Column(String, nullable=True)
+    caregiver_email = Column(String, nullable=True, index=True)
+    caregiver_phone = Column(String, nullable=True)
     dob = Column(DateTime, nullable=True)
     email = Column(String, nullable=True, index=True)  # <-- NEW
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -68,6 +74,22 @@ class Reading(Base):
 
     patient = relationship("Patient", back_populates="readings")
     call = relationship("Call", back_populates="readings")
+
+
+class Role(Base):
+    __tablename__ = "roles"
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False)
+    first_name = Column(String, nullable=False)
+    last_name = Column(String, nullable=True)
+    role = Column(String, nullable=False)  # e.g., 'Admin', 'Nurse'
+    email = Column(String, nullable=True, index=True)
+    phone = Column(String, nullable=True)
+    password = Column(String, nullable=True)
+    address = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    org = relationship("Organization", back_populates="roles")
 
 
 
