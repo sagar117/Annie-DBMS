@@ -19,6 +19,7 @@ import asyncio
 import base64
 import json
 import os
+from app.services.sms import send_marketing_sms
 from urllib.parse import urlparse, parse_qs, unquote
 from datetime import datetime
 from typing import Optional
@@ -267,7 +268,33 @@ async def bridge_ws(ws, path_arg: str = None):
                         call_row.duration_seconds = int((call_row.end_time - call_row.start_time).total_seconds())
                     session.add(call_row)
                     session.commit()
-                    print(f"[persist_call_end_time_and_duration] set end_time for call_id={call_id}")
+                    print(f"[persist_call_end_time_and_duration] set end_time for call_id={call_id} agent={getattr(call_row,'agent',None)} patient_id={getattr(call_row,'patient_id',None)}")
+
+                    # If this call used the wellcare_marketing agent, send follow-up SMS here
+                    try:
+                        agent_name = getattr(call_row, 'agent', None)
+                        if agent_name == "wellcare_marketing" and getattr(call_row, 'patient_id', None):
+                            try:
+                                patient = session.query(models.Patient).filter(models.Patient.id == call_row.patient_id).first()
+                            except Exception as e:
+                                patient = None
+                                print(f"[persist_call_end_time_and_duration] patient lookup failed: {e}")
+
+                            if patient and getattr(patient, 'phone', None):
+                                to_number = getattr(patient, 'phone')
+                                print(f"[marketing][bridge] Sending follow-up SMS to patient {patient.id} phone={to_number} (agent: {agent_name})")
+                                try:
+                                    ok, err = send_marketing_sms(to_number)
+                                    if ok:
+                                        print(f"[marketing][bridge] SMS send helper reported OK to {to_number}")
+                                    else:
+                                        print(f"[marketing][bridge] SMS send helper reported ERROR to {to_number}: {err}")
+                                except Exception as e:
+                                    print(f"[marketing][bridge] SMS helper raised exception: {e}")
+                            else:
+                                print(f"[marketing][bridge] No patient or phone for patient_id={getattr(call_row,'patient_id',None)}")
+                    except Exception as e:
+                        print(f"[persist_call_end_time_and_duration] marketing SMS flow failed: {e}")
             finally:
                 session.close()
         except Exception as e:
