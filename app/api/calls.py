@@ -388,10 +388,23 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
 @router.post("/{call_id}/complete")
 def complete_call(call_id: int):
     session = db.SessionLocal()
+    # visibility: log entry immediately so we can see the endpoint was invoked
+    logger.info("[complete_call] invoked with call_id=%s", call_id)
     try:
         call = session.query(models.Call).filter(models.Call.id == call_id).first()
         if not call:
+            logger.warning("[complete_call] call not found: %s", call_id)
             raise HTTPException(status_code=404, detail="Call not found")
+
+        # Log call details for debugging SMS flow
+        logger.info("[complete_call] call found id=%s agent=%s status=%s patient_id=%s twilio_call_sid=%s",
+                    getattr(call, 'id', None), getattr(call, 'agent', None), getattr(call, 'status', None),
+                    getattr(call, 'patient_id', None), getattr(call, 'twilio_call_sid', None))
+        # Also print to stdout to help capture logs in environments where logging handlers are not showing
+        try:
+            print(f"[complete_call] call={call.id} agent={call.agent} status={call.status} patient_id={call.patient_id} twilio_call_sid={call.twilio_call_sid}")
+        except Exception:
+            pass
 
         if call.status != "completed":
             call.end_time = call.end_time or datetime.utcnow()
