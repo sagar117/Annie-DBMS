@@ -293,17 +293,24 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
             session.rollback()
 
         # Always persist a single 'readings' row (even if empty list)
+
         row_value = to_store
         # ensure JSON-serializable: wrap scalars into {"value": scalar} earlier; lists/dicts kept as-is
         if not isinstance(row_value, (dict, list)):
             row_value = {"value": row_value}
+
+        # Avoid double-wrapping if row_value already follows the {"value": ...} envelope
+        if isinstance(row_value, dict) and "value" in row_value and len(row_value) == 1:
+            stored_value = row_value
+        else:
+            stored_value = {"value": row_value}
 
         now = datetime.utcnow()
         rd = models.Reading(
             patient_id=call.patient_id,
             call_id=call.id,
             reading_type="readings",
-            value=_json.dumps({"value": row_value}),
+            value=_json.dumps(stored_value),
             units=None,
             raw_text=str(row_value),
             recorded_at=call.end_time or call.start_time or now,
