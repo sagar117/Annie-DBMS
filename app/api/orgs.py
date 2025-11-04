@@ -83,6 +83,37 @@ def org_stats(
 
 
 
+@router.get("/{org_id}/scheduler_settings")
+def get_scheduler_settings(org_id: int, db_session: Session = Depends(get_db)):
+    """
+    Return scheduler settings for an organization.
+
+    Response format on success:
+      {"start_hour_est": 9, "end_hour_est": 17, "interval_minutes": 5, "enabled": true}
+
+    If no settings row exists for the org, fall back to returning an empty dict (caller may try GET /api/orgs/{org_id}).
+    """
+    try:
+        row = db_session.query(models.SchedulerSetting).filter(models.SchedulerSetting.org_id == org_id).first()
+    except Exception:
+        row = None
+
+    if row:
+        return {
+            "start_hour_est": row.start_time if row.start_time is not None else None,
+            "end_hour_est": row.end_time if row.end_time is not None else None,
+            "interval_minutes": row.callback_interval if row.callback_interval is not None else None,
+            "enabled": bool(row.enabled),
+        }
+
+    # fallback: verify the org exists; if it does return empty dict, else 404
+    org = db_session.query(models.Organization).filter(models.Organization.id == org_id).first()
+    if not org:
+        raise HTTPException(status_code=404, detail="Org not found")
+    return {}
+
+
+
 @router.put("/{org_id}", response_model=schemas.OrgOut)
 def update_org(org_id: int, payload: Dict[str, Any], db_session: Session = Depends(get_db)):
     """

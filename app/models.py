@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, Text, UniqueConstraint, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .db import Base
@@ -118,3 +118,19 @@ class PatientDailyReading(Base):
     __table_args__ = (
         UniqueConstraint("patient_id", "reading_date", name="uq_patient_daily_reading"),
     )
+
+
+class SchedulerSetting(Base):
+    __tablename__ = "scheduler_setting"
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, unique=True)
+    # Store hours in EST local as integer hours (0-23)
+    start_time = Column(Integer, nullable=True)
+    end_time = Column(Integer, nullable=True)
+    # callback interval in minutes
+    callback_interval = Column(Integer, nullable=True)
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # optional relationship not strictly required
+    # org = relationship("Organization", back_populates="scheduler_setting")
