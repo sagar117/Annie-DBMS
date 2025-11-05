@@ -268,20 +268,45 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
     """
     try:
         # Determine what to store
-        to_store = None
+        readings = []
+        
+        # Extract readings from OpenAI response
         if parsed is None:
-            to_store = []
-        elif isinstance(parsed, dict) and parsed.get("readings") is not None:
-            to_store = parsed.get("readings")
-        elif isinstance(parsed, (dict, list)):
-            to_store = parsed
+            readings = []
+        elif isinstance(parsed, dict):
+            if "readings" in parsed:
+                # Direct readings array
+                readings = parsed["readings"]
+            elif "BP" in parsed:
+                # Single BP reading
+                readings = [{"BP": parsed["BP"]}]
+            elif parsed:
+                # Other reading type
+                readings = [parsed]
+        elif isinstance(parsed, list):
+            readings = parsed
         else:
-            # scalar or unknown -> wrap in list
-            to_store = [parsed]
+            readings = []
 
-        # Normalize empty dict -> empty list for consistency
-        if isinstance(to_store, dict) and not to_store:
-            to_store = []
+        # Validate and normalize BP readings
+        normalized = []
+        for reading in readings:
+            if isinstance(reading, dict) and "BP" in reading:
+                bp_data = reading["BP"]
+                if isinstance(bp_data, dict):
+                    # Ensure BP has systolic, diastolic and units
+                    normalized_bp = {
+                        "BP": {
+                            "systolic": bp_data.get("systolic"),
+                            "diastolic": bp_data.get("diastolic"),
+                            "units": bp_data.get("units", "mmHg")
+                        }
+                    }
+                    normalized.append(normalized_bp)
+            elif reading:  # Keep non-empty readings
+                normalized.append(reading)
+                
+        to_store = normalized if normalized else []
 
         # Delete any existing rows of type 'summary' or 'readings' for this call
         try:
@@ -441,25 +466,34 @@ def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
     try:
         rows = session.query(models.Reading).filter(models.Reading.call_id == call_id).all()
         if rows:
-            out = {}
+            # We only expect one readings row per call
             for r in rows:
-                try:
-                    val = _json.loads(r.value) if r.value else None
-                except Exception:
-                    val = r.value
-                out.setdefault(r.reading_type, []).append(
-                    {
-                        "id": r.id,
-                        "patient_id": r.patient_id,
-                        "call_id": r.call_id,
-                        "reading_type": r.reading_type,
-                        "value": val,
-                        "raw_text": r.raw_text,
-                        "units": r.units,
-                        "recorded_at": r.recorded_at.isoformat() if getattr(r, "recorded_at", None) else None,
-                    }
-                )
-            return {"call_id": call_id, "from_db": True, "readings": out}
+                if r.reading_type == "readings":
+                    try:
+                        stored = _json.loads(r.value) if r.value else None
+                        
+                        # Extract the actual readings array - handle both new and old format
+                        readings = []
+                        if isinstance(stored, dict):
+                            if "value" in stored and isinstance(stored["value"], list):
+                                readings = stored["value"]  # New format
+                            elif stored:
+                                readings = [stored]  # Old format or single reading
+                        elif isinstance(stored, list):
+                            readings = stored
+                            
+                        # Return the readings array directly
+                        return {
+                            "call_id": call_id,
+                            "from_db": True,
+                            "readings": readings
+                        }
+                    except Exception as e:
+                        logger.error("Failed to parse readings JSON: %s", e)
+                        return {"call_id": call_id, "from_db": True, "readings": []}
+                        
+            # If no readings found but rows exist
+            return {"call_id": call_id, "from_db": True, "readings": []}
 
         call = session.query(models.Call).filter(models.Call.id == call_id).first()
         if not call:
@@ -472,7 +506,7 @@ def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
         except Exception as e:
             logger.exception("openai runtime extract failed: %s", e)
             if not persist_if_missing:
-                return {"call_id": call_id, "from_db": False, "readings": {}}
+                return {"call_id": call_id, "from_db": False, "readings": []}
 
         if persist_if_missing:
             try:
@@ -480,7 +514,14 @@ def get_call_readings(call_id: int, persist_if_missing: bool = Query(True)):
             except Exception as e:
                 logger.exception("persist parsed readings (get_call_readings) failed: %s", e)
 
-        return {"call_id": call_id, "from_db": False, "readings": parsed or {}}
+        # Ensure consistent empty array response if no readings
+        readings = []
+        if parsed and isinstance(parsed, dict) and "readings" in parsed:
+            readings = parsed["readings"]
+        elif parsed:
+            readings = [parsed]
+
+        return {"call_id": call_id, "from_db": False, "readings": readings}
     finally:
         session.close()
 
