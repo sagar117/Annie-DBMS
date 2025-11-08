@@ -322,6 +322,7 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
             session.rollback()
 
         # Store questionnaire if present
+        questionnaire_added = False
         if questionnaire:
             questionnaire_reading = models.Reading(
                 patient_id=call.patient_id,
@@ -333,8 +334,12 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
                 recorded_at=datetime.utcnow()
             )
             session.add(questionnaire_reading)
-            
-        # Always persist a single 'readings' row (even if empty list)
+            questionnaire_added = True
+
+        # Persist 'readings' row only when there are actual readings OR when no questionnaire was provided.
+        # This avoids creating an empty 'readings' row when only a questionnaire exists (which caused two rows for
+        # the same call). The original behavior to always create an empty readings row is preserved when there is
+        # no questionnaire data.
         row_value = to_store
         # ensure JSON-serializable: wrap scalars into {"value": scalar} earlier; lists/dicts kept as-is
         if not isinstance(row_value, (dict, list)):
@@ -345,6 +350,15 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
             stored_value = row_value
         else:
             stored_value = {"value": row_value}
+
+        # If there are no readings to store but we already added a questionnaire, skip creating the empty
+        # 'readings' row to avoid duplicating rows for the same call.
+        if not to_store and questionnaire_added:
+            try:
+                session.commit()
+            except Exception:
+                session.rollback()
+            return
 
         now = datetime.utcnow()
         rd = models.Reading(
