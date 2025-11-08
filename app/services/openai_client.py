@@ -13,8 +13,12 @@ You are given a medical call transcript between an AI nurse and a patient. Produ
    - For pulse provide value (integer) and units "bpm".
    - For glucose provide value and units (mg/dL or mmol/L if mentioned).
    - For weight provide value (float) and units (kg/lb).
+3) A JSON object "questionnaire" with any questions asked and the patient's responses/ratings.
+   - Format: array of objects with "question" and "response" fields
+   - For numeric ratings, include "rating" field with the number
+   - Example: {"question": "How would you rate your pain?", "response": "moderate", "rating": 5}
 If a reading has a timestamp in the transcript, include recorded_at (ISO 8601). If not, omit recorded_at.
-Return only valid JSON with keys: summary (string) and readings (array).
+Return only valid JSON with keys: summary (string), readings (array), and questionnaire (array).
 Transcript:
 ---
 {transcript}

@@ -269,14 +269,18 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
     try:
         # Determine what to store
         readings = []
+        questionnaire = []
         
-        # Extract readings from OpenAI response
+        # Extract readings and questionnaire from OpenAI response
         if parsed is None:
             readings = []
         elif isinstance(parsed, dict):
             if "readings" in parsed:
                 # Direct readings array
                 readings = parsed["readings"]
+            if "questionnaire" in parsed:
+                # Store questionnaire responses
+                questionnaire = parsed["questionnaire"]
             elif "BP" in parsed:
                 # Single BP reading
                 readings = [{"BP": parsed["BP"]}]
@@ -308,17 +312,29 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
                 
         to_store = normalized if normalized else []
 
-        # Delete any existing rows of type 'summary' or 'readings' for this call
+        # Delete any existing rows of type 'summary', 'readings', or 'questionnaire' for this call
         try:
             session.query(models.Reading).filter(models.Reading.call_id == call.id,
-                                                 models.Reading.reading_type.in_(["summary", "readings"])
+                                                 models.Reading.reading_type.in_(["summary", "readings", "questionnaire"])
                                                  ).delete(synchronize_session=False)
             session.commit()
         except Exception:
             session.rollback()
 
+        # Store questionnaire if present
+        if questionnaire:
+            questionnaire_reading = models.Reading(
+                patient_id=call.patient_id,
+                call_id=call.id,
+                reading_type="questionnaire",
+                value=_json.dumps({"value": questionnaire}),
+                units=None,
+                raw_text=str(questionnaire),
+                recorded_at=datetime.utcnow()
+            )
+            session.add(questionnaire_reading)
+            
         # Always persist a single 'readings' row (even if empty list)
-
         row_value = to_store
         # ensure JSON-serializable: wrap scalars into {"value": scalar} earlier; lists/dicts kept as-is
         if not isinstance(row_value, (dict, list)):
