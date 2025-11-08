@@ -272,25 +272,38 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
         questionnaire = []
         
         # Extract readings and questionnaire from OpenAI response
-        if parsed is None:
-            readings = []
-        elif isinstance(parsed, dict):
-            if "readings" in parsed:
-                # Direct readings array
-                readings = parsed["readings"]
-            if "questionnaire" in parsed:
-                # Store questionnaire responses
-                questionnaire = parsed["questionnaire"]
-            elif "BP" in parsed:
-                # Single BP reading
-                readings = [{"BP": parsed["BP"]}]
-            elif parsed:
-                # Other reading type
-                readings = [parsed]
-        elif isinstance(parsed, list):
-            readings = parsed
-        else:
-            readings = []
+        if not parsed:
+            return  # Skip persistence for empty/None responses
+            
+        if not isinstance(parsed, dict):
+            logger.error("Unexpected response format from OpenAI extraction: %s", type(parsed))
+            return
+            
+        # Skip if we got an error response
+        if "error" in parsed:
+            logger.error("Skipping readings persistence due to extraction error: %s", parsed.get("error"))
+            return
+            
+        # Handle readings array
+        if "readings" in parsed and isinstance(parsed["readings"], list):
+            for reading in parsed["readings"]:
+                if isinstance(reading, dict):
+                    if "BP" in reading:
+                        # Keep BP readings as is - they'll be normalized later
+                        readings.append(reading)
+                    elif all(key in reading for key in ["type", "value", "units"]):
+                        # Standard reading format: {"type": "pulse", "value": 80, "units": "bpm"}
+                        readings.append(reading)
+            
+        # Handle single BP reading case
+        elif "BP" in parsed and isinstance(parsed["BP"], dict):
+            readings = [{"BP": parsed["BP"]}]
+            
+        # Extract questionnaire if present
+        if "questionnaire" in parsed and isinstance(parsed["questionnaire"], list):
+            for q in parsed["questionnaire"]:
+                if isinstance(q, dict) and "question" in q:
+                    questionnaire.append(q)
 
         # Validate and normalize BP readings
         normalized = []

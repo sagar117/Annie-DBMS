@@ -8,11 +8,14 @@ MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 EXTRACTION_PROMPT = """
 You are given a medical call transcript between an AI nurse and a patient. Produce:
 1) A concise call summary (1-3 sentences).
-2) A JSON object "readings" listing any measurements found (BP, pulse, glucose, weight).
-   - For BP provide systolic and diastolic (integers) and units "mmHg".
-   - For pulse provide value (integer) and units "bpm".
-   - For glucose provide value and units (mg/dL or mmol/L if mentioned).
-   - For weight provide value (float) and units (kg/lb).
+2) A JSON object "readings" array containing readings in this format:
+   - For BP: {"BP": {"systolic": 120, "diastolic": 80, "units": "mmHg"}}
+   - For others: {"type": "pulse", "value": 80, "units": "bpm"}
+   Supported types:
+   - BP (special format above)
+   - pulse (value as integer, units "bpm")
+   - glucose (value as number, units "mg/dL" or "mmol/L")
+   - weight (value as float, units "kg" or "lb")
 3) A JSON object "questionnaire" with any questions asked and the patient's responses/ratings.
    - Format: array of objects with "question" and "response" fields
    - For numeric ratings, include "rating" field with the number
@@ -26,6 +29,9 @@ Transcript:
 """
 
 def extract_readings_from_transcript(transcript: str) -> Dict[str, Any]:
+    if not transcript or not transcript.strip():
+        return {"summary": "", "readings": [], "questionnaire": []}
+        
     prompt = EXTRACTION_PROMPT.replace("{transcript}", transcript)
     try:
         resp = openai.ChatCompletion.create(
@@ -35,10 +41,27 @@ def extract_readings_from_transcript(transcript: str) -> Dict[str, Any]:
             max_tokens=800,
         )
         text = resp.choices[0].message.content.strip()
+        if not text:
+            return {"summary": "", "readings": [], "questionnaire": []}
+            
         import json, re
         m = re.search(r"\{.*\}\s*$", text, flags=re.DOTALL)
         json_text = m.group(0) if m else text
         data = json.loads(json_text)
+        
+        # Ensure the response has the expected structure
+        if not isinstance(data, dict):
+            return {"summary": "", "readings": [], "questionnaire": []}
+            
+        # Ensure readings and questionnaire are lists
+        if "readings" not in data or not isinstance(data["readings"], list):
+            data["readings"] = []
+        if "questionnaire" not in data or not isinstance(data["questionnaire"], list):
+            data["questionnaire"] = []
+            
         return data
     except Exception as e:
-        return {"summary": "", "readings": [] , "error": str(e)}
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error("Failed to extract readings: %s", e)
+        return {"summary": "", "readings": [], "questionnaire": []}
