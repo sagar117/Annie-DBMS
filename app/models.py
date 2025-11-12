@@ -39,6 +39,7 @@ class Patient(Base):
     org = relationship("Organization", back_populates="patients")
     calls = relationship("Call", back_populates="patient")
     readings = relationship("Reading", back_populates="patient")
+    hmes_readings = relationship("HMESReading", back_populates="patient")
 
 class Call(Base):
     __tablename__ = "calls"
@@ -134,3 +135,17 @@ class SchedulerSetting(Base):
 
     # optional relationship not strictly required
     # org = relationship("Organization", back_populates="scheduler_setting")
+
+
+class HMESReading(Base):
+    __tablename__ = "hmes_readings"
+    id = Column(Integer, primary_key=True, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False, index=True)
+    readings_date = Column(DateTime, nullable=False, index=True)
+    readings = Column(String, nullable=False)  # JSON string with Steps, Heart Rate, Blood Oxygen, Sleep
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    org = relationship("Organization")
+    patient = relationship("Patient", back_populates="hmes_readings")

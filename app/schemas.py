@@ -108,3 +108,40 @@ class RoleOut(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+# HMES Reading Schemas
+class HMESReadingsData(BaseModel):
+    steps: Optional[int] = None
+    heart_rate: Optional[int] = None
+    blood_oxygen: Optional[int] = None
+    sleep: Optional[float] = None  # hours
+
+
+class HMESReadingCreate(BaseModel):
+    org_id: int
+    patient_id: int
+    readings_date: datetime
+    readings: HMESReadingsData
+
+
+class HMESReadingUpdate(BaseModel):
+    readings_date: Optional[datetime] = None
+    readings: Optional[HMESReadingsData] = None
+
+
+class HMESReadingOut(BaseModel):
+    id: int
+    org_id: int
+    patient_id: int
+    readings_date: datetime
+    readings: dict  # JSON data
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class HMESReadingBulkCreate(BaseModel):
+    readings: List[HMESReadingCreate]
