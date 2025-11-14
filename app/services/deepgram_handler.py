@@ -217,6 +217,100 @@ async def bridge_ws(ws, path_arg: str = None):
     streamsid_queue = asyncio.Queue()
     should_hangup = asyncio.Event()
 
+    async def handle_function_call(function_name: str, input_data: dict, call_id_val: int, patient_id_val: int):
+        """
+        Handle function calls from Deepgram agent (client-side execution).
+        Currently supports: detect_emergency
+        """
+        print(f"[handle_function_call] Executing {function_name} with input={input_data}")
+        
+        if function_name == "detect_emergency":
+            try:
+                from app import db, models
+                import requests
+                
+                severity = input_data.get("severity", "high")
+                reason = input_data.get("reason", "Emergency detected during call")
+                
+                # Call emergency API
+                payload = {
+                    "call_id": call_id_val,
+                    "patient_id": patient_id_val,
+                    "severity": severity,
+                    "signal_text": reason,
+                    "detector_info": {
+                        "model": "deepgram_function_call",
+                        "function": function_name,
+                        "severity": severity
+                    }
+                }
+                
+                # Use internal API call
+                try:
+                    # Get base URL from environment or use localhost
+                    import os
+                    base_url = os.getenv("PUBLIC_HOST", "http://localhost:5000")
+                    api_url = f"{base_url}/api/emergency/event"
+                    
+                    response = requests.post(api_url, json=payload, timeout=5)
+                    response.raise_for_status()
+                    
+                    print(f"[handle_function_call] Emergency event created successfully")
+                    return {
+                        "success": True,
+                        "message": f"Emergency logged with severity {severity}. Medical staff will be notified.",
+                        "event_id": response.json().get("id")
+                    }
+                except Exception as e:
+                    print(f"[handle_function_call] API call failed, trying direct DB: {e}")
+                    
+                    # Fallback: direct DB insertion
+                    session = db.SessionLocal()
+                    try:
+                        patient = session.query(models.Patient).filter(models.Patient.id == patient_id_val).first()
+                        if not patient:
+                            return {"success": False, "message": "Patient not found"}
+                        
+                        org_id = getattr(patient, 'org_id', None)
+                        
+                        emerg_event = models.EmergencyEvent(
+                            call_id=call_id_val,
+                            patient_id=patient_id_val,
+                            org_id=org_id,
+                            severity=severity,
+                            signal_text=reason,
+                            detector_info=json.dumps(payload["detector_info"]),
+                            detected_at=datetime.utcnow(),
+                            created_at=datetime.utcnow(),
+                        )
+                        session.add(emerg_event)
+                        
+                        patient.emergency_flag = 1
+                        patient.last_emergency_at = emerg_event.detected_at
+                        session.add(patient)
+                        
+                        session.commit()
+                        event_id = emerg_event.id
+                        session.close()
+                        
+                        print(f"[handle_function_call] Emergency event {event_id} created via direct DB")
+                        return {
+                            "success": True,
+                            "message": f"Emergency logged with severity {severity}. Medical staff will be notified.",
+                            "event_id": event_id
+                        }
+                    except Exception as db_err:
+                        session.rollback()
+                        session.close()
+                        print(f"[handle_function_call] Direct DB failed: {db_err}")
+                        return {"success": False, "message": f"Failed to log emergency: {str(db_err)}"}
+                        
+            except Exception as e:
+                print(f"[handle_function_call] Error in detect_emergency: {e}")
+                return {"success": False, "message": f"Error: {str(e)}"}
+        
+        return {"success": False, "message": f"Unknown function: {function_name}"}
+
     def persist_transcript_fragment(role: str, text: str):
         try:
             if not call_id:
@@ -315,6 +409,27 @@ async def bridge_ws(ws, path_arg: str = None):
                     "think": {
                         "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.3},
                         "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip(),
+                        "functions": [
+                            {
+                                "name": "detect_emergency",
+                                "description": "Call this function when the patient mentions needing emergency help, calling 911, or describes a life-threatening situation (severe chest pain, can't breathe, stroke symptoms, etc). This logs the emergency and alerts medical staff.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "severity": {
+                                            "type": "string",
+                                            "enum": ["critical", "high", "medium"],
+                                            "description": "Severity level: critical for 911/life-threatening, high for urgent medical, medium for concerning symptoms"
+                                        },
+                                        "reason": {
+                                            "type": "string",
+                                            "description": "Brief description of what the patient said that triggered the emergency (e.g., 'Patient said they need to call 911')"
+                                        }
+                                    },
+                                    "required": ["severity", "reason"]
+                                }
+                            }
+                        ]
                     },
                     "speak": {"provider": {"type": "deepgram", "model": "aura-2-thalia-en"}},
    #                 "greeting": greeting_text,
@@ -355,6 +470,34 @@ async def bridge_ws(ws, path_arg: str = None):
                                 decoded = {"raw": message}
                             ev_type = decoded.get("type", "")
                             print(f"[deepgram event] type={ev_type} keys={list(decoded.keys())}")
+                            
+                            # Handle function call requests from Deepgram
+                            if ev_type == "FunctionCallRequest":
+                                function_call_id = decoded.get("function_call_id")
+                                function_name = decoded.get("function_name")
+                                input_data = decoded.get("input", {})
+                                print(f"[function_call] Received request: function={function_name} call_id={function_call_id} input={input_data}")
+                                
+                                # Execute the function and send response
+                                try:
+                                    result = await handle_function_call(function_name, input_data, call_id, patient_id)
+                                    response_msg = {
+                                        "type": "FunctionCallResponse",
+                                        "function_call_id": function_call_id,
+                                        "output": result
+                                    }
+                                    await sts_ws.send(json.dumps(response_msg))
+                                    print(f"[function_call] Sent response for call_id={function_call_id}")
+                                except Exception as e:
+                                    print(f"[function_call] Error executing {function_name}: {e}")
+                                    error_response = {
+                                        "type": "FunctionCallResponse",
+                                        "function_call_id": function_call_id,
+                                        "output": {"error": str(e)}
+                                    }
+                                    await sts_ws.send(json.dumps(error_response))
+                                continue
+                            
                             if ev_type == "ConversationText":
                                 role = decoded.get("role")
                                 content = decoded.get("content") or decoded.get("text") or ""
