@@ -411,28 +411,7 @@ async def bridge_ws(ws, path_arg: str = None):
                     "listen": {"provider": {"type": "deepgram", "model": "nova-3"}},
                     "think": {
                         "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.4},
-                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip() + "\n\nIMPORTANT: You MUST call the detect_emergency function immediately if the patient says ANY of these words or phrases: chest pain, heart pain, can't breathe, difficulty breathing, shortness of breath, severe pain, crushing pain, pressure in chest, numbness, dizzy, lightheaded, call 911, need ambulance, emergency. Call the function FIRST before responding to the patient.",
-                        "functions": [
-                            {
-                                "name": "detect_emergency",
-                                "description": "CRITICAL: Must be called immediately when patient mentions chest pain, breathing difficulty, or emergency keywords. Call this BEFORE responding to patient.",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "severity": {
-                                            "type": "string",
-                                            "enum": ["critical", "high"],
-                                            "description": "Severity level"
-                                        },
-                                        "reason": {
-                                            "type": "string",
-                                            "description": "What the patient said"
-                                        }
-                                    },
-                                    "required": ["severity", "reason"]
-                                }
-                            }
-                        ]
+                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip(),
                     },
                     "speak": {"provider": {"type": "deepgram", "model": "aura-2-thalia-en"}},
    #                 "greeting": greeting_text,
