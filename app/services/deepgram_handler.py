@@ -135,6 +135,7 @@ async def bridge_ws(ws, path_arg: str = None):
     # --- Primary: DB-first agent lookup if call_id available ---
     patient = None
     org = None
+    patient_id = None  # Track patient_id for function calls
     if call_id is not None:
         try:
             from app import db, models  # lazy import
@@ -144,9 +145,11 @@ async def bridge_ws(ws, path_arg: str = None):
                 if call_row:
                     print(f"[bridge_ws] DB lookup: found call row id={call_id} agent={getattr(call_row, 'agent', None)}")
                     agent = getattr(call_row, "agent", None)
+                    patient_id = getattr(call_row, "patient_id", None)  # Capture patient_id
                     # Fetch patient + org for personalization
                     try:
-                        patient = session.query(models.Patient).filter(models.Patient.id == call_row.patient_id).first()
+                        if patient_id:
+                            patient = session.query(models.Patient).filter(models.Patient.id == patient_id).first()
                         org = session.query(models.Organization).filter(models.Organization.id == call_row.org_id).first()
                     except Exception as e:
                         print(f"[bridge_ws] patient/org lookup failed: {e}")
@@ -473,10 +476,27 @@ async def bridge_ws(ws, path_arg: str = None):
                             
                             # Handle function call requests from Deepgram
                             if ev_type == "FunctionCallRequest":
-                                function_call_id = decoded.get("function_call_id")
-                                function_name = decoded.get("function_name")
+                                # The message format may have 'functions' array or direct properties
+                                functions_list = decoded.get("functions", [])
+                                
+                                # Try to get function details from the message
+                                function_call_id = decoded.get("function_call_id") or decoded.get("id")
+                                function_name = decoded.get("function_name") or decoded.get("name")
                                 input_data = decoded.get("input", {})
+                                
+                                # If functions array exists, use the first function
+                                if functions_list and len(functions_list) > 0:
+                                    func = functions_list[0]
+                                    function_name = func.get("name")
+                                    input_data = func.get("arguments", {})
+                                    function_call_id = func.get("call_id") or function_call_id
+                                
                                 print(f"[function_call] Received request: function={function_name} call_id={function_call_id} input={input_data}")
+                                print(f"[function_call] Full message: {decoded}")
+                                
+                                if not function_name:
+                                    print(f"[function_call] Warning: No function_name found in message")
+                                    continue
                                 
                                 # Execute the function and send response
                                 try:
