@@ -1,0 +1,19 @@
+{
+  "functions": [
+    {
+      "name": "create_emergency_event",
+      "description": "Save an emergency event for a patient and update their emergency flag.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "call_id": {"type": "integer", "description": "Call ID if available"},
+          "patient_id": {"type": "integer", "description": "Patient ID"},
+          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"], "description": "Severity of the emergency"},
+          "signal_text": {"type": "string", "description": "Excerpt from transcript or model output"},
+          "detector_info": {"type": "object", "description": "Detection metadata (model, score, rule)"}
+        },
+        "required": ["patient_id", "severity"]
+      }
+    }
+  ]
+}

@@ -34,7 +34,25 @@ class Patient(Base):
     caregiver_phone = Column(String, nullable=True)
     dob = Column(DateTime, nullable=True)
     email = Column(String, nullable=True, index=True)  # <-- NEW
+
+    emergency_flag = Column(Integer, default=0)
+    last_emergency_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+# EmergencyEvent model for emergency_events table
+class EmergencyEvent(Base):
+    __tablename__ = "emergency_events"
+    id = Column(Integer, primary_key=True, index=True)
+    call_id = Column(Integer, ForeignKey("calls.id"), nullable=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False, index=True)
+    severity = Column(String, nullable=True)  # critical | high | medium | low
+    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    signal_text = Column(Text, nullable=True)  # excerpt from transcript or model output
+    detector_info = Column(String, nullable=True)  # JSON: {model:, score:, rule:}
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    call = relationship("Call")
+    patient = relationship("Patient")
 
     org = relationship("Organization", back_populates="patients")
     calls = relationship("Call", back_populates="patient")

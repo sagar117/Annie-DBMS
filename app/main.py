@@ -22,10 +22,11 @@ app = FastAPI(title="Annie Backend")
 from app.api import email_transcripts  # add import
 from app.api import auth
 from app.api import patients_import
+from app.api import emergency
 app.include_router(patients_import.router)
-
 app.include_router(auth.router)
 app.include_router(email_transcripts.router)  # include router
+app.include_router(emergency.router)
 
 
 # CORS (adjust allowed_origins for production)

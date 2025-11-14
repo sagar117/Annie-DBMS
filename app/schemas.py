@@ -145,3 +145,24 @@ class HMESReadingOut(BaseModel):
 
 class HMESReadingBulkCreate(BaseModel):
     readings: List[HMESReadingCreate]
+
+
+class EmergencyEventCreate(BaseModel):
+    call_id: int | None = None
+    patient_id: int
+    severity: str
+    signal_text: str | None = None
+    detector_info: dict | None = None
+
+class EmergencyEventOut(BaseModel):
+    id: int
+    call_id: int | None
+    patient_id: int
+    severity: str | None
+    detected_at: datetime
+    signal_text: str | None
+    detector_info: dict | None
+    created_at: datetime
+
+    class Config:
+        orm_mode = True
