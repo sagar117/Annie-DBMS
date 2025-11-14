@@ -410,12 +410,12 @@ async def bridge_ws(ws, path_arg: str = None):
                     "language": "en",
                     "listen": {"provider": {"type": "deepgram", "model": "nova-3"}},
                     "think": {
-                        "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.7},
-                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip() + "\n\nYou have access to a detect_emergency function. Use it when the patient mentions chest pain, breathing problems, or any medical emergency.",
+                        "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.4},
+                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip() + "\n\nIMPORTANT: You MUST call the detect_emergency function immediately if the patient says ANY of these words or phrases: chest pain, heart pain, can't breathe, difficulty breathing, shortness of breath, severe pain, crushing pain, pressure in chest, numbness, dizzy, lightheaded, call 911, need ambulance, emergency. Call the function FIRST before responding to the patient.",
                         "functions": [
                             {
                                 "name": "detect_emergency",
-                                "description": "Call this function when patient reports emergency symptoms like chest pain or difficulty breathing",
+                                "description": "CRITICAL: Must be called immediately when patient mentions chest pain, breathing difficulty, or emergency keywords. Call this BEFORE responding to patient.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
@@ -474,8 +474,13 @@ async def bridge_ws(ws, path_arg: str = None):
                             ev_type = decoded.get("type", "")
                             print(f"[deepgram event] type={ev_type} keys={list(decoded.keys())}")
                             
+                            # Log specific important events
+                            if ev_type in ["FunctionCallRequest", "FunctionCall", "function_call"]:
+                                print(f"[deepgram event] *** EMERGENCY FUNCTION TRIGGER *** {decoded}")
+                            
                             # Handle function call requests from Deepgram
                             if ev_type == "FunctionCallRequest":
+                                print(f"[function_call] *** FUNCTION CALL DETECTED *** Full message: {decoded}")
                                 # The message format may have 'functions' array or direct properties
                                 functions_list = decoded.get("functions", [])
                                 
