@@ -58,9 +58,9 @@ class EmergencyEvent(Base):
     detector_info = Column(String, nullable=True)  # JSON: {model:, score:, rule:}
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    call = relationship("Call")
-    patient = relationship("Patient")
-    org = relationship("Organization")
+    call = relationship("Call", foreign_keys=[call_id])
+    patient = relationship("Patient", foreign_keys=[patient_id])
+    org = relationship("Organization", foreign_keys=[org_id])
 
     org = relationship("Organization", back_populates="patients")
     calls = relationship("Call", back_populates="patient")
