@@ -411,28 +411,7 @@ async def bridge_ws(ws, path_arg: str = None):
                     "listen": {"provider": {"type": "deepgram", "model": "nova-3"}},
                     "think": {
                         "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.3},
-                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip() + "\n\nIMPORTANT: If the patient mentions ANY of the following, you MUST immediately call the detect_emergency function:\n- Chest pain, severe chest pain, pressure in chest\n- Can't breathe, difficulty breathing, shortness of breath\n- Calling 911, need emergency help, need ambulance\n- Heart attack, stroke symptoms\n- Severe pain anywhere in the body\n- Feeling dizzy, lightheaded, or faint\n- Any life-threatening situation\n\nCall detect_emergency BEFORE responding to the patient.",
-                        "functions": [
-                            {
-                                "name": "detect_emergency",
-                                "description": "MUST be called immediately when patient reports chest pain, difficulty breathing, mentions 911, or any life-threatening symptoms. This is critical for patient safety.",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "severity": {
-                                            "type": "string",
-                                            "enum": ["critical", "high", "medium"],
-                                            "description": "critical=chest pain/can't breathe/911/stroke, high=severe pain/dizziness, medium=concerning symptoms"
-                                        },
-                                        "reason": {
-                                            "type": "string",
-                                            "description": "Exact quote of what patient said (e.g., 'severe pain in my chest')"
-                                        }
-                                    },
-                                    "required": ["severity", "reason"]
-                                }
-                            }
-                        ]
+                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip() + "\n\nNote: Emergency situations (chest pain, difficulty breathing, 911 mentions) are automatically detected and logged by the system. Continue the conversation naturally and provide appropriate care advice.",
                     },
                     "speak": {"provider": {"type": "deepgram", "model": "aura-2-thalia-en"}},
    #                 "greeting": greeting_text,
