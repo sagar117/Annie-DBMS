@@ -394,6 +394,77 @@ def _persist_single_readings(session: Session, call: models.Call, parsed: Any):
         logger.exception("persist_single_readings failed: %s", e)
 
 
+# Helper: detect emergency keywords and create emergency event
+# -------------------------------
+def _check_and_create_emergency_event(session: Session, call: models.Call, transcript: str):
+    """
+    Scan transcript for emergency keywords (911, emergency, help, etc.) and create
+    an emergency event if detected. Updates patient emergency_flag and last_emergency_at.
+    """
+    if not transcript or not call.patient_id:
+        return
+    
+    # Emergency keywords to detect (case-insensitive)
+    emergency_keywords = [
+        "911", "9-1-1", "emergency", "ambulance", "help me", "dying", 
+        "can't breathe", "chest pain", "heart attack", "stroke",
+        "severe pain", "bleeding", "unconscious", "call ambulance"
+    ]
+    
+    transcript_lower = transcript.lower()
+    detected_keywords = [kw for kw in emergency_keywords if kw in transcript_lower]
+    
+    if not detected_keywords:
+        return  # No emergency detected
+    
+    # Determine severity based on keywords
+    critical_keywords = ["911", "9-1-1", "dying", "can't breathe", "heart attack", "stroke", "unconscious"]
+    severity = "critical" if any(kw in transcript_lower for kw in critical_keywords) else "high"
+    
+    logger.warning("[emergency] Detected emergency keywords in call %s: %s", call.id, detected_keywords)
+    
+    try:
+        # Get patient and org_id
+        patient = session.query(models.Patient).filter(models.Patient.id == call.patient_id).first()
+        if not patient:
+            logger.error("[emergency] Patient %s not found for emergency event", call.patient_id)
+            return
+        
+        org_id = getattr(patient, 'org_id', None)
+        
+        # Create emergency event
+        signal_text = f"Detected keywords: {', '.join(detected_keywords)}"
+        detector_info = _json.dumps({
+            "model": "keyword_scanner",
+            "keywords": detected_keywords,
+            "severity": severity
+        })
+        
+        emerg_event = models.EmergencyEvent(
+            call_id=call.id,
+            patient_id=call.patient_id,
+            org_id=org_id,
+            severity=severity,
+            signal_text=signal_text,
+            detector_info=detector_info,
+            detected_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+        session.add(emerg_event)
+        
+        # Update patient emergency flag and last_emergency_at
+        patient.emergency_flag = 1
+        patient.last_emergency_at = emerg_event.detected_at
+        session.add(patient)
+        
+        session.commit()
+        logger.info("[emergency] Created emergency event %s for patient %s", emerg_event.id, patient.id)
+        
+    except Exception as e:
+        session.rollback()
+        logger.exception("[emergency] Failed to create emergency event: %s", e)
+
+
 # -------------------------------
 # Complete call (persist readings only)
 # -------------------------------
@@ -451,6 +522,12 @@ def complete_call(call_id: int):
             _persist_single_readings(session, call, parsed)
         except Exception as e:
             logger.exception("persisting single readings failed: %s", e)
+
+        # Check for emergency keywords in transcript and create emergency event
+        try:
+            _check_and_create_emergency_event(session, call, transcript_text)
+        except Exception as e:
+            logger.exception("emergency detection failed: %s", e)
 
         # For wellcare_marketing agent, send SMS follow-up
         logger.info("[marketing] Checking agent type: %s", call.agent)
