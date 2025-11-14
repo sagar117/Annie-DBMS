@@ -51,6 +51,7 @@ class EmergencyEvent(Base):
     id = Column(Integer, primary_key=True, index=True)
     call_id = Column(Integer, ForeignKey("calls.id"), nullable=True)
     patient_id = Column(Integer, ForeignKey("patients.id"), nullable=False, index=True)
+    org_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
     severity = Column(String, nullable=True)  # critical | high | medium | low
     detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     signal_text = Column(Text, nullable=True)  # excerpt from transcript or model output
@@ -59,6 +60,7 @@ class EmergencyEvent(Base):
 
     call = relationship("Call")
     patient = relationship("Patient")
+    org = relationship("Organization")
 
     org = relationship("Organization", back_populates="patients")
     calls = relationship("Call", back_populates="patient")
