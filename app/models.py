@@ -35,9 +35,15 @@ class Patient(Base):
     dob = Column(DateTime, nullable=True)
     email = Column(String, nullable=True, index=True)  # <-- NEW
 
+
     emergency_flag = Column(Integer, default=0)
     last_emergency_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    org = relationship("Organization", back_populates="patients")
+    calls = relationship("Call", back_populates="patient")
+    readings = relationship("Reading", back_populates="patient")
+    hmes_readings = relationship("HMESReading", back_populates="patient")
 
 # EmergencyEvent model for emergency_events table
 class EmergencyEvent(Base):
