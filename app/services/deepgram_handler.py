@@ -411,22 +411,22 @@ async def bridge_ws(ws, path_arg: str = None):
                     "listen": {"provider": {"type": "deepgram", "model": "nova-3"}},
                     "think": {
                         "provider": {"type": "open_ai", "model": "gpt-4o-mini", "temperature": 0.3},
-                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip(),
+                        "prompt":  (base_prompt or "You are a helpful AI nurse assisting a patient.").strip() + "\n\nIMPORTANT: If the patient mentions ANY of the following, you MUST immediately call the detect_emergency function:\n- Chest pain, severe chest pain, pressure in chest\n- Can't breathe, difficulty breathing, shortness of breath\n- Calling 911, need emergency help, need ambulance\n- Heart attack, stroke symptoms\n- Severe pain anywhere in the body\n- Feeling dizzy, lightheaded, or faint\n- Any life-threatening situation\n\nCall detect_emergency BEFORE responding to the patient.",
                         "functions": [
                             {
                                 "name": "detect_emergency",
-                                "description": "Call this function when the patient mentions needing emergency help, calling 911, or describes a life-threatening situation (severe chest pain, can't breathe, stroke symptoms, etc). This logs the emergency and alerts medical staff.",
+                                "description": "MUST be called immediately when patient reports chest pain, difficulty breathing, mentions 911, or any life-threatening symptoms. This is critical for patient safety.",
                                 "parameters": {
                                     "type": "object",
                                     "properties": {
                                         "severity": {
                                             "type": "string",
                                             "enum": ["critical", "high", "medium"],
-                                            "description": "Severity level: critical for 911/life-threatening, high for urgent medical, medium for concerning symptoms"
+                                            "description": "critical=chest pain/can't breathe/911/stroke, high=severe pain/dizziness, medium=concerning symptoms"
                                         },
                                         "reason": {
                                             "type": "string",
-                                            "description": "Brief description of what the patient said that triggered the emergency (e.g., 'Patient said they need to call 911')"
+                                            "description": "Exact quote of what patient said (e.g., 'severe pain in my chest')"
                                         }
                                     },
                                     "required": ["severity", "reason"]
@@ -523,6 +523,17 @@ async def bridge_ws(ws, path_arg: str = None):
                                 content = decoded.get("content") or decoded.get("text") or ""
                                 print(f"[deepgram conv] role={role} text={content[:300]}")
                                 persist_transcript_fragment(role, content)
+                            elif ev_type == "Error":
+                                error_desc = decoded.get("description", "Unknown error")
+                                error_code = decoded.get("code", "Unknown code")
+                                print(f"[deepgram ERROR] code={error_code} description={error_desc}")
+                                print(f"[deepgram ERROR] Full message: {decoded}")
+                            elif ev_type == "History":
+                                # History event - just log it
+                                print(f"[deepgram history] {decoded}")
+                            else:
+                                # Log any other event types we're not handling
+                                print(f"[deepgram unhandled] type={ev_type} message={decoded}")
                             continue
 
                         # binary frames -> forward to Twilio
