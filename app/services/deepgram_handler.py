@@ -523,6 +523,54 @@ async def bridge_ws(ws, path_arg: str = None):
                                 content = decoded.get("content") or decoded.get("text") or ""
                                 print(f"[deepgram conv] role={role} text={content[:300]}")
                                 persist_transcript_fragment(role, content)
+                                
+                                # FALLBACK: Check for emergency keywords if function calling fails
+                                if role == "user" and patient_id:
+                                    content_lower = content.lower()
+                                    emergency_keywords = [
+                                        "chest pain", "severe pain", "can't breathe", "can not breathe",
+                                        "difficulty breathing", "shortness of breath", "call 911",
+                                        "need ambulance", "heart attack", "stroke", "severe chest pain",
+                                        "pressure in chest", "crushing pain", "numbness", "can't feel",
+                                        "dizzy", "lightheaded", "faint", "passing out", "emergency"
+                                    ]
+                                    if any(keyword in content_lower for keyword in emergency_keywords):
+                                        print(f"[FALLBACK EMERGENCY DETECTION] Keywords detected in: {content}")
+                                        # Trigger emergency event directly
+                                        try:
+                                            from app.db import SessionLocal as db
+                                            from app.models import EmergencyEvent, Patient
+                                            from datetime import datetime
+                                            
+                                            session = db()
+                                            try:
+                                                patient = session.query(Patient).filter_by(id=patient_id).first()
+                                                if patient:
+                                                    # Create emergency event
+                                                    event = EmergencyEvent(
+                                                        org_id=patient.org_id,
+                                                        patient_id=patient_id,
+                                                        call_id=call_row.id,
+                                                        severity="high",
+                                                        signal_text=content[:500],
+                                                        detector_info="fallback_keyword_detection"
+                                                    )
+                                                    session.add(event)
+                                                    
+                                                    # Update patient flags
+                                                    patient.emergency_flag = 1
+                                                    patient.last_emergency_at = datetime.utcnow()
+                                                    
+                                                    session.commit()
+                                                    print(f"[FALLBACK] Emergency event created for patient {patient_id}")
+                                                else:
+                                                    print(f"[FALLBACK] Patient {patient_id} not found")
+                                            finally:
+                                                session.close()
+                                        except Exception as e:
+                                            print(f"[FALLBACK] Error creating emergency event: {e}")
+                                            import traceback
+                                            traceback.print_exc()
                             elif ev_type == "Error":
                                 error_desc = decoded.get("description", "Unknown error")
                                 error_code = decoded.get("code", "Unknown code")
