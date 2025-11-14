@@ -62,11 +62,6 @@ class EmergencyEvent(Base):
     patient = relationship("Patient", foreign_keys=[patient_id])
     org = relationship("Organization", foreign_keys=[org_id])
 
-    org = relationship("Organization", back_populates="patients")
-    calls = relationship("Call", back_populates="patient")
-    readings = relationship("Reading", back_populates="patient")
-    hmes_readings = relationship("HMESReading", back_populates="patient")
-
 class Call(Base):
     __tablename__ = "calls"
     id = Column(Integer, primary_key=True, index=True)
